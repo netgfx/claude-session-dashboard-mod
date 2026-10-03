@@ -1,0 +1,4 @@
+{
+  "description": "session-dashboard hooks module",
+  "modules": ["./register.js"]
+}
