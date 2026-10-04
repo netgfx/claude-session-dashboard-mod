@@ -1,7 +1,7 @@
 // Builds the pane's element tree from plain data. No mods API calls here:
 // register.js passes in the element table and the callbacks.
 
-import { fit, fmtAgo, fmtDuration, fmtNum, fmtUntil } from './lib.js'
+import { fit, fitStart, fmtAgo, fmtDuration, fmtNum, fmtUntil } from './lib.js'
 
 export const COLORS = {
   hot: '#F2862E',
@@ -15,8 +15,9 @@ export const COLORS = {
 
 /**
  * @param E the element table from `$.ui.resolve(e)`
- * @param v `{ width, now, snap, cache, ttlMs, usage, errorsOpen }`
- * @param act `{ refresh(proc), close(proc), toggleErrors(), rescan(), clearExited(), closePane() }`
+ * @param v `{ width, now, snap, cache, ttlMs, usage, errorsOpen, links, linkUi }`
+ * @param act `{ refresh(proc), close(proc), toggleErrors(), rescan(), clearExited(), closePane(),
+ *   addLink(), addLinkPath(path), editLink(link), renameLink(link, name), unlink(link) }`
  */
 export function renderDashboard(E, v, act) {
   const { Box, Text } = E
@@ -33,6 +34,8 @@ export function renderDashboard(E, v, act) {
       activitySection(E, v, act, W),
       rule(),
       processSection(E, v, act, W),
+      rule(),
+      linkSection(E, v, act, W),
       rule(),
       taskSection(E, v, W),
       rule(),
@@ -260,6 +263,92 @@ function processSection(E, v, act, W) {
   })
 
   return Box({ flexDirection: 'column', children: [title, headerRow, ...rows, footer] })
+}
+
+// ---------------------------------------------------------------------------
+
+function linkSection(E, v, act, W) {
+  const { Box, Text, Button, Input } = E
+  const links = v.links
+  const ui = v.linkUi
+
+  const title = Box({
+    flexDirection: 'row',
+    width: W,
+    children: [
+      Box({
+        flexGrow: 1,
+        flexDirection: 'row',
+        columnGap: 1,
+        children: [
+          Text({ bold: true, dimColor: true, children: ['LINKED FOLDERS'] }),
+          ...(links.length ? [Text({ dimColor: true, children: [String(links.length)] })] : []),
+          ...(ui.busy ? [Text({ color: COLORS.warn, children: [ui.busy] })] : []),
+        ],
+      }),
+      Box({
+        marginRight: 1,
+        children: [Button({ key: 'link-add', label: '+', hotkey: 'l', onPress: act.addLink })],
+      }),
+    ],
+  })
+
+  const rows = links.map((l) => {
+    if (ui.editing === l.name) {
+      return Input({
+        key: 'link-name-' + l.name,
+        label: 'rename',
+        value: l.name,
+        submitLabel: 'rename',
+        autoFocus: true,
+        onSubmit: (name) => act.renameLink(l, name),
+      })
+    }
+    // Fixed widths, as in the background rows, so a long path never pushes ✎ / ✕ off the edge
+    const NAME = Math.min(18, Math.max(6, Math.floor(W / 3)))
+    const ACTIONS = 12
+    const PATH = Math.max(4, W - NAME - ACTIONS - 1)
+    return Box({
+      key: 'link-' + l.name,
+      flexDirection: 'row',
+      width: W,
+      children: [
+        Text({ bold: true, color: COLORS.accent, wrap: 'truncate-end', children: [fit(l.name, NAME)] }),
+        Box({
+          width: PATH,
+          flexShrink: 1,
+          children: [Text({ dimColor: true, wrap: 'truncate-start', children: ['→ ' + fitStart(l.target, PATH - 2)] })],
+        }),
+        Box({
+          flexDirection: 'row',
+          flexShrink: 0,
+          columnGap: 1,
+          marginLeft: 1,
+          children: [
+            Button({ key: 'link-edit-' + l.name, label: '✎', onPress: () => act.editLink(l) }),
+            Button({ key: 'link-remove-' + l.name, label: '✕', onPress: () => act.unlink(l) }),
+          ],
+        }),
+      ],
+    })
+  })
+
+  const pathInput = ui.adding
+    ? [
+        Input({
+          key: 'link-path',
+          label: 'folder',
+          placeholder: 'path to a folder on this machine',
+          submitLabel: 'link',
+          autoFocus: true,
+          onSubmit: act.addLinkPath,
+        }),
+      ]
+    : []
+
+  const empty = links.length === 0 && !ui.adding ? [Text({ dimColor: true, wrap: 'truncate-end', children: ['None. Press + to link a folder into the workspace.'] })] : []
+
+  return Box({ flexDirection: 'column', children: [title, ...rows, ...pathInput, ...empty] })
 }
 
 // ---------------------------------------------------------------------------

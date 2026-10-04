@@ -7,17 +7,25 @@ import {
   applyTaskUpdate,
   applyTodoWrite,
   backgroundIdOf,
+  baseName,
   cacheStatus,
   classifyToolResult,
+  cleanPath,
   emptySnapshot,
   emptyTokens,
   firstLine,
+  gitignoreAdd,
+  gitignoreRemove,
+  isValidLinkName,
+  isWithin,
+  joinPath,
   matchProcess,
   parseLsof,
   parseNetstat,
   parseProcessList,
   parseTaskNotification,
   pushError,
+  uniqueName,
 } from './lib.js'
 import { renderDashboard } from './view.js'
 
@@ -37,6 +45,33 @@ const PS_SCRIPT =
   '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ' +
   'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}" -f $_.ProcessId,$_.ParentProcessId,$_.CommandLine }'
 
+// Opens the OS folder picker and prints the chosen path (nothing on cancel).
+// -STA for WinForms; the TopMost owner brings the dialog above the terminal.
+const PICK_PS =
+  'Add-Type -AssemblyName System.Windows.Forms; ' +
+  '$o = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }; ' +
+  '$d = New-Object System.Windows.Forms.FolderBrowserDialog; ' +
+  "$d.Description = 'Pick a folder to link into the workspace'; $d.ShowNewFolderButton = $false; " +
+  "if ($d.ShowDialog($o) -eq 'OK') { [Console]::OutputEncoding=[Text.Encoding]::UTF8; $d.SelectedPath }"
+const PICKERS_WINDOWS = [['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', PICK_PS]]
+const PICKERS_UNIX = [
+  // `tell me to activate` brings the dialog in front of the terminal
+  ['osascript', '-e', 'tell me to activate', '-e', 'POSIX path of (choose folder with prompt "Pick a folder to link into the workspace")'],
+  ['zenity', '--file-selection', '--directory', '--title=Pick a folder to link into the workspace'],
+  ['kdialog', '--getexistingdirectory', '.', '--title', 'Pick a folder to link into the workspace'],
+]
+// Paths ride in environment variables, so no quoting can break them.
+// A symbolic link needs Developer Mode or admin; a junction needs neither.
+const LINK_PS =
+  "$ErrorActionPreference = 'Stop'; " +
+  'try { New-Item -ItemType SymbolicLink -Path $env:SD_LINK -Target $env:SD_TARGET | Out-Null } ' +
+  'catch { New-Item -ItemType Junction -Path $env:SD_LINK -Target $env:SD_TARGET | Out-Null }'
+// Deletes the link alone: a non-recursive delete refuses a real, non-empty folder
+const UNLINK_PS =
+  "$ErrorActionPreference = 'Stop'; " +
+  "$i = Get-Item -LiteralPath $env:SD_LINK -Force; if (-not $i.LinkType) { throw 'not a link' }; " +
+  '[System.IO.Directory]::Delete($env:SD_LINK)'
+
 // What the pane shows. Mirrored into $.state so it survives a hot reload.
 let S = emptySnapshot()
 let options = {}
@@ -54,6 +89,12 @@ let scanning = false
 let ticks = 0
 let usage = null
 const agentLabels = new Map()
+// Folders linked into the workspace root, kept in $.store per workspace
+let links = []
+let linkRoot
+// editing: the link whose name is being typed; adding: the path field is up
+// (no folder picker here); busy: what the section is doing right now
+let linkUi = { editing: null, adding: false, busy: null }
 
 export function register(on, opts) {
   options = opts ?? {}
@@ -62,6 +103,7 @@ export function register(on, opts) {
     const started = await next(e)
     await restore($)
     await detectEnvironment($)
+    await loadLinks($)
     paneOpen = (await $.ui.panes()).some((p) => p.id === PANE)
 
     // One timer drives the countdown, the usage figures, and the process scan
@@ -239,6 +281,8 @@ export function register(on, opts) {
         ttlSource,
         usage,
         errorsOpen,
+        links,
+        linkUi,
       },
       {
         refresh: (proc) => restartProcess($, proc),
@@ -256,6 +300,22 @@ export function register(on, opts) {
           await $.ui.close({ id: PANE })
           paneOpen = false
         },
+        addLink: () => pickAndLink($),
+        addLinkPath: (path) => {
+          linkUi.adding = false
+          redraw()
+          if (cleanPath(path)) return withBusy($, 'linking…', () => linkFolder($, path))
+        },
+        editLink: (link) => {
+          linkUi.editing = linkUi.editing === link.name ? null : link.name
+          redraw()
+        },
+        renameLink: (link, name) => {
+          linkUi.editing = null
+          redraw()
+          return withBusy($, 'renaming…', () => renameLink($, link, name))
+        },
+        unlink: (link) => withBusy($, 'unlinking…', () => unlinkFolder($, link)),
       },
     )
   })
@@ -582,4 +642,169 @@ async function restartProcess($, proc) {
   $.ui.toast('Restarted: ' + proc.command)
   $.clock.after(1500, () => scanProcesses($, false))
   $.clock.after(6000, () => scanProcesses($, false))
+}
+
+// ---------------------------------------------------------------------------
+// Linked folders
+
+const linksKey = (root) => 'links:' + (isWindows ? root.toLowerCase() : root)
+// Case-insensitive everywhere: Windows and macOS disks are, and a clash ln
+// missed would put the new link inside the folder already holding the name
+const sameName = (a, b) => a.toLowerCase() === b.toLowerCase()
+
+async function workspaceRoot($) {
+  linkRoot ??= await $.session.root()
+  return linkRoot
+}
+
+/** Names at the workspace root, and which of them are links. */
+async function rootEntries($, root) {
+  const entries = await $.fs.list(root).catch(() => [])
+  return { names: entries.map((x) => x.name), linkNames: new Set(entries.filter((x) => x.isLink).map((x) => x.name)) }
+}
+
+/** The saved list, minus any link deleted outside the dashboard. */
+async function loadLinks($) {
+  try {
+    linkRoot = undefined
+    const root = await workspaceRoot($)
+    const saved = await $.store.get(linksKey(root))
+    const list = Array.isArray(saved) ? saved : []
+    const { linkNames } = await rootEntries($, root)
+    links = list.filter((l) => linkNames.has(l.name))
+    if (links.length !== list.length) await saveLinks($)
+  } catch {
+    links = []
+  }
+}
+
+async function saveLinks($) {
+  await $.store.set(linksKey(await workspaceRoot($)), links)
+  $.ui.invalidate('ui.render')
+}
+
+async function withBusy($, label, fn) {
+  if (linkUi.busy) return
+  linkUi.busy = label
+  $.ui.invalidate('ui.render')
+  try {
+    await fn()
+  } catch (error) {
+    $.ui.toast('Linked folders: ' + firstLine(error?.message))
+  } finally {
+    linkUi.busy = null
+    $.ui.invalidate('ui.render')
+  }
+}
+
+async function editGitignore($, root, edit) {
+  const path = joinPath(root, '.gitignore', isWindows)
+  const before = await $.fs.read(path).catch(() => '')
+  const after = edit(before)
+  if (after !== before) await $.fs.write(path, after)
+}
+
+/** Runs the OS folder picker: `{ path }`, `{ cancelled }`, or `{ unavailable }` when none opens. */
+async function pickFolder($) {
+  for (const argv of isWindows ? PICKERS_WINDOWS : PICKERS_UNIX) {
+    let r
+    try {
+      r = await $.process.run(argv, { timeoutMs: 5 * 60_000 })
+    } catch {
+      continue // Not installed, or no answer in time
+    }
+    const out = r.stdout.trim()
+    if (r.exitCode === 0 && out) return { path: out.split(/\r?\n/).pop() }
+    // A picker that could not open (no display) says why on stderr; a cancel doesn't, or says "cancel"
+    if (r.exitCode !== 0 && r.stderr.trim() && !/cancel/i.test(r.stderr)) continue
+    return { cancelled: true }
+  }
+  return { unavailable: true }
+}
+
+function pickAndLink($) {
+  return withBusy($, 'pick a folder…', async () => {
+    const picked = await pickFolder($)
+    if (picked.path) {
+      linkUi.busy = 'linking…'
+      await linkFolder($, picked.path)
+    } else if (picked.unavailable) {
+      linkUi.adding = true
+      $.ui.toast('No folder picker on this machine: type the folder path instead')
+    }
+  })
+}
+
+async function makeLink($, target, link) {
+  const r = isWindows
+    ? await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', LINK_PS], { env: { SD_LINK: link, SD_TARGET: target } })
+    : // -n: an existing link at `link` is an error, never a folder to link inside
+      await $.process.run(['ln', '-sn', target, link])
+  if (r.exitCode !== 0) throw new Error('could not link ' + baseName(link) + ': ' + firstLine(r.stderr || r.stdout))
+}
+
+async function removeLink($, link) {
+  const r = isWindows
+    ? await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', UNLINK_PS], { env: { SD_LINK: link } })
+    : await $.process.run(['rm', link])
+  if (r.exitCode !== 0) throw new Error('could not remove ' + baseName(link) + ': ' + firstLine(r.stderr || r.stdout))
+}
+
+async function linkFolder($, rawPath) {
+  const target = cleanPath(rawPath)
+  const root = await workspaceRoot($)
+  const stat = await $.fs.stat(target).catch(() => undefined)
+  if (stat?.kind !== 'dir') throw new Error('not a folder: ' + target)
+  if (isWithin(root, target) || isWithin(target, root)) {
+    throw new Error('that folder is the workspace, inside it, or holds it')
+  }
+  const base = baseName(target).replace(/[:*?"<>|]/g, '_').replace(/[. ]+$/, '') || 'linked'
+  const { names } = await rootEntries($, root)
+  const name = uniqueName(base, names)
+  await makeLink($, target, joinPath(root, name, isWindows))
+  await editGitignore($, root, (text) => gitignoreAdd(text, name))
+  links = [...links, { name, target, addedAt: Date.now() }]
+  await saveLinks($)
+  $.ui.toast('Linked ' + name + ' → ' + target)
+}
+
+async function renameLink($, link, rawName) {
+  const name = String(rawName ?? '').trim()
+  if (!name || name === link.name) return
+  if (!isValidLinkName(name)) throw new Error('"' + name + '" is not a valid folder name')
+  const root = await workspaceRoot($)
+  const { names, linkNames } = await rootEntries($, root)
+  if (names.some((n) => n !== link.name && sameName(n, name))) throw new Error(name + ' already exists in the workspace')
+  if (!linkNames.has(link.name)) throw new Error(link.name + ' is no longer a link')
+
+  const oldPath = joinPath(root, link.name, isWindows)
+  const newPath = joinPath(root, name, isWindows)
+  if (sameName(name, link.name)) {
+    // A case-only change on a case-insensitive file system: go through a temporary name
+    const tmp = oldPath + '.sd-rename'
+    await makeLink($, link.target, tmp)
+    await removeLink($, oldPath)
+    await makeLink($, link.target, newPath)
+    await removeLink($, tmp)
+  } else {
+    // The new link first, so a failure leaves the old one in place
+    await makeLink($, link.target, newPath)
+    await removeLink($, oldPath)
+  }
+  await editGitignore($, root, (text) => gitignoreAdd(gitignoreRemove(text, link.name), name))
+  links = links.map((l) => (l.name === link.name ? { ...l, name } : l))
+  await saveLinks($)
+  $.ui.toast('Renamed ' + link.name + ' → ' + name)
+}
+
+async function unlinkFolder($, link) {
+  const root = await workspaceRoot($)
+  const { linkNames } = await rootEntries($, root)
+  // Gone already: just forget it. Never deletes anything that isn't a link.
+  if (linkNames.has(link.name)) await removeLink($, joinPath(root, link.name, isWindows))
+  await editGitignore($, root, (text) => gitignoreRemove(text, link.name))
+  links = links.filter((l) => l.name !== link.name)
+  if (linkUi.editing === link.name) linkUi.editing = null
+  await saveLinks($)
+  $.ui.toast('Unlinked ' + link.name + ' (the folder itself is untouched)')
 }

@@ -67,6 +67,14 @@ export function fit(text, n) {
   return text.padEnd(n)
 }
 
+/** Like `fit`, but cuts from the start so the end of the string (a path's tail) stays. */
+export function fitStart(text, n) {
+  text = String(text)
+  if (n <= 0) return ''
+  if (text.length > n) return n > 1 ? '…' + text.slice(text.length - n + 1) : text.slice(-n)
+  return text.padEnd(n)
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 
@@ -303,4 +311,98 @@ export function backgroundIdOf(result) {
   const r = result?.result
   if (!r || typeof r !== 'object') return undefined
   return r.backgroundTaskId ?? r.taskId ?? r.task_id ?? undefined
+}
+
+// ---------------------------------------------------------------------------
+// Linked folders
+
+export const GITIGNORE_HEADER = '# Linked folders (session-dashboard)'
+
+/** The last segment of a path: `C:\work\notes\` -> "notes". */
+export function baseName(path) {
+  const parts = String(path).split(/[\\/]+/).filter(Boolean)
+  return parts[parts.length - 1] ?? ''
+}
+
+/** Trims what a picker or a pasted path carries: whitespace, quotes, a trailing separator. */
+export function cleanPath(path) {
+  let p = String(path ?? '').trim()
+  if (/^(["']).*\1$/.test(p)) p = p.slice(1, -1).trim()
+  // Keep a drive or filesystem root's own separator
+  if (p.length > 1 && !/^[A-Za-z]:[\\/]$/.test(p)) p = p.replace(/[\\/]+$/, '')
+  return p
+}
+
+/** A link's name: one path segment the file system and git both take. */
+export function isValidLinkName(name) {
+  if (!name || name === '.' || name === '..' || name.length > 255) return false
+  if (/[\\/:*?"<>|\x00-\x1f]/.test(name)) return false
+  // Windows drops a trailing dot or space; git would then ignore the wrong name
+  return !/[. ]$/.test(name) && name.trim() === name
+}
+
+/**
+ * `base`, or `base-2`, `base-3`, … if a sibling already holds the name, ignoring
+ * case: Windows and macOS disks do.
+ */
+export function uniqueName(base, taken) {
+  const used = new Set([...taken].map((s) => s.toLowerCase()))
+  if (!used.has(base.toLowerCase())) return base
+  for (let i = 2; ; i++) if (!used.has((base + '-' + i).toLowerCase())) return base + '-' + i
+}
+
+/** Joins a folder and one name with the platform's separator. */
+export function joinPath(root, name, isWindows) {
+  return String(root).replace(/[\\/]+$/, '') + (isWindows ? '\\' : '/') + name
+}
+
+/** Whether `inner` is `outer` or lies beneath it, ignoring case as Windows and macOS disks do. */
+export function isWithin(inner, outer) {
+  const norm = (p) => cleanPath(p).replace(/[\\/]+/g, '/').toLowerCase()
+  const a = norm(inner)
+  const b = norm(outer)
+  return a === b || a.startsWith(b.endsWith('/') ? b : b + '/')
+}
+
+/** The .gitignore line for a link at the workspace root, glob characters escaped. */
+export function gitignoreEntry(name) {
+  // No trailing slash: git sees a symlink as a file, and "name/" matches folders only
+  return '/' + name.replace(/[\\*?[\]!#]/g, '\\$&')
+}
+
+function splitLines(text) {
+  return text === '' ? [] : text.replace(/\r?\n$/, '').split(/\r?\n/)
+}
+
+/** .gitignore text with the link's entry added under the mod's header. Unchanged if present. */
+export function gitignoreAdd(text, name) {
+  const eol = /\r\n/.test(text) ? '\r\n' : '\n'
+  const lines = splitLines(text)
+  const entry = gitignoreEntry(name)
+  if (lines.includes(entry)) return text
+  let at = lines.indexOf(GITIGNORE_HEADER)
+  if (at < 0) {
+    if (lines.length && lines[lines.length - 1].trim() !== '') lines.push('')
+    lines.push(GITIGNORE_HEADER)
+    at = lines.length - 1
+  }
+  let end = at + 1
+  while (end < lines.length && lines[end].startsWith('/')) end++
+  lines.splice(end, 0, entry)
+  return lines.join(eol) + eol
+}
+
+/** .gitignore text without the link's entry; drops the header once nothing is under it. */
+export function gitignoreRemove(text, name) {
+  const eol = /\r\n/.test(text) ? '\r\n' : '\n'
+  const entry = gitignoreEntry(name)
+  let lines = splitLines(text)
+  if (!lines.includes(entry)) return text
+  lines = lines.filter((l) => l !== entry)
+  const at = lines.indexOf(GITIGNORE_HEADER)
+  if (at >= 0 && !(lines[at + 1] ?? '').startsWith('/')) {
+    lines.splice(at, 1)
+    if (at > 0 && lines[at - 1] === '' && (at === lines.length || lines[at] === '')) lines.splice(at - 1, 1)
+  }
+  return lines.length ? lines.join(eol) + eol : ''
 }
