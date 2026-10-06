@@ -43,7 +43,7 @@ test('the pane draws on both surfaces with no data', async ($, on) => {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: 'SESSION DASHBOARD' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Cold' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'No task list yet.' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'No plan, tasks or agents yet.' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -214,14 +214,14 @@ test('refresh stops the command and starts it again in the background', async ($
   expect(await ui.find({ key: 'close-bg2' })).toBeDefined()
 })
 
-test('the prompt gets the task-list instruction', async ($, on) => {
+test('the prompt gets no task-list instruction unless force_task_list is on', async ($, on) => {
   let seen: any
   on('prompt.submit', ($: any, e: any) => {
     seen = e
     return { text: e.text }
   })
   await $.prompt.submit({ text: 'build it' } as any)
-  expect(String(seen.context?.[0] ?? '')).toMatch(/task list/)
+  expect(seen.context ?? []).toEqual([])
 })
 
 const band = (isFullscreen: boolean) => ({

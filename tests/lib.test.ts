@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { classifyToolResult, matchProcess, parseNetstat, parseProcessList, parseTaskNotification } from '../hooks/lib.js'
+import { classifyToolResult, matchProcess, parseNetstat, parseProcessList, parseTaskNotification, promptFromMessages } from '../hooks/lib.js'
 
 // Captured from a real Windows session: Claude Code's Bash tool running `python -m http.server 8765` in the background
 const SHELL =
@@ -39,4 +39,17 @@ test('classifies errors in successful output, and leaves clean output alone', ()
   expect(classifyToolResult('Bash', { result: {}, text: 'all good' })).toBe(null)
   // Reading a file that mentions 404 is not an error
   expect(classifyToolResult('Read', { result: {}, text: 'HTTP/1.1 404 Not Found' })).toBe(null)
+})
+
+test('promptFromMessages finds the whole prompt a headline was cut from', () => {
+  const long = 'on the task where we show the prompt beneath the task row, we truncate it, can we make the ... clickable so it expands'
+  const messages = [
+    { role: 'user', text: 'an older request' },
+    { role: 'user', text: long + '\r\nand a way to close it again (collapse)\n<system-reminder>hook context</system-reminder>' },
+    { role: 'assistant', text: 'working on it' },
+    { role: 'user', text: '' },
+  ]
+  expect(promptFromMessages(messages, long.slice(0, 100))).toBe(long + '\nand a way to close it again (collapse)')
+  expect(promptFromMessages(messages, 'not there')).toBe('')
+  expect(promptFromMessages(undefined, 'x')).toBe('')
 })

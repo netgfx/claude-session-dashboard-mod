@@ -1,7 +1,7 @@
 {
   "name": "session-dashboard",
   "version": "0.1.0",
-  "description": "A side pane for the current session: prompt cache hot/cold, tool calls and errors, background commands with restart and stop, the live task list, and token usage for the main agent and subagents",
+  "description": "A side pane for the current session: prompt cache hot/cold, tool calls and errors, background commands with restart and stop, the approved plan, task list, subagents and swarm agents, and token usage for the main agent and subagents",
   "author": { "name": "djmid" },
   "homepage": "https://github.com/netgfx/claude-session-dashboard-mod",
   "repository": "https://github.com/netgfx/claude-session-dashboard-mod",
@@ -18,8 +18,8 @@
     "force_task_list": {
       "type": "boolean",
       "title": "Ask Claude for a task list",
-      "description": "Add a short instruction to each prompt so Claude keeps a task list the dashboard can show",
-      "default": true
+      "description": "Add a short instruction to each prompt so Claude keeps a task list the dashboard can show. Only useful on models that have the task tools (or with CLAUDE_CODE_ENABLE_TODO_TOOLS=1)",
+      "default": false
     },
     "cache_ttl_minutes": {
       "type": "number",

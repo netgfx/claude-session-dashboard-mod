@@ -2,6 +2,7 @@
 // errors, background commands, the task list, and token usage per agent.
 
 import {
+  addMix,
   applyTaskCreate,
   applyTaskList,
   applyTaskUpdate,
@@ -11,8 +12,10 @@ import {
   cacheStatus,
   classifyToolResult,
   cleanPath,
+  describeToolCall,
   emptySnapshot,
   emptyTokens,
+  estimateTokens,
   firstLine,
   gitignoreAdd,
   gitignoreRemove,
@@ -20,12 +23,18 @@ import {
   isWithin,
   joinPath,
   matchProcess,
+  mergeAgents,
   parseLsof,
   parseNetstat,
+  parsePlan,
   parseProcessList,
   parseTaskNotification,
+  promptFromMessages,
   pushError,
+  splitUsage,
+  swarmRows,
   uniqueName,
+  WAIT_TOOLS,
 } from './lib.js'
 import { renderDashboard } from './view.js'
 
@@ -34,7 +43,8 @@ const NO_DOCK =
   'Dashboard opens as a right-hand sidebar only in the fullscreen layout: start Claude Code with CLAUDE_CODE_NO_FLICKER=1 in a terminal at least 110 columns wide'
 const BACKGROUND_TOOLS = ['Bash', 'PowerShell', 'Monitor']
 
-// Added to each prompt so the model keeps a task list the pane can show
+// Added to each prompt with `force_task_list` on, so the model keeps a task list
+// the pane can show. Off by default: newer models have no task tool to keep one
 const TASK_NUDGE =
   'Keep a task list for this request with your task tool (TaskCreate/TaskUpdate, or TodoWrite if that is the one you have) ' +
   'whenever the work takes more than one step: create the tasks before starting, mark exactly one in_progress while you work on it, ' +
@@ -82,6 +92,8 @@ let isFullscreen
 // auto_open waits here until a drawing says the pane would dock on the right
 let wantsAutoOpen = false
 let errorsOpen = false
+// Whether the request under "now" shows in full or cut to one line
+let promptOpen = false
 let ttlMs = 5 * 60_000
 let ttlSource = 'default'
 let isWindows = false
@@ -89,6 +101,12 @@ let scanning = false
 let ticks = 0
 let usage = null
 const agentLabels = new Map()
+// Per agent ('main' or its id): the last request, tool-result tokens its next
+// request will carry, and the tools that failed since that request
+const steps = new Map()
+// Total distribution: whether the narrow slices' shares show, and the ledger
+// entries pressed to show theirs
+let distUi = { showSmall: false, shown: new Set() }
 // Folders linked into the workspace root, kept in $.store per workspace
 let links = []
 let linkRoot
@@ -137,6 +155,7 @@ export function register(on, opts) {
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     S = emptySnapshot()
     agentLabels.clear()
+    steps.clear()
     changed($)
     return next(e)
   })
@@ -180,6 +199,7 @@ export function register(on, opts) {
     S.toolCalls.total += 1
     if (e.agentId === undefined) S.toolCalls.main += 1
     else S.toolCalls.sub += 1
+    if (e.agentId === undefined) setNow($, WAIT_TOOLS.includes(e.tool) ? 'waiting' : 'working', { step: describeToolCall(e) })
     $.ui.invalidate('ui.render')
 
     let result
@@ -219,6 +239,48 @@ export function register(on, opts) {
   // At the end of each response, the engine lists the background work still in flight
   on('classic.Stop', async ($, e, next) => {
     reconcileBackground($, e.background_tasks)
+    if (S.now && S.now.status !== 'done') setNow($, 'done', { step: 'answered' })
+    endTurn($)
+    return next(e)
+  })
+
+  // ---- What the main agent is doing now -----------------------------------
+
+  on('turn.start', async ($, e, next) => {
+    const headline = firstLine(e.text, 100)
+    // The whole prompt, for the expanded view (a Text child holds at most 10,000 characters)
+    const prompt = String(e.text ?? '').replace(/\r\n/g, '\n').trim().slice(0, 9000)
+    if (headline) promptOpen = false
+    // A continuation keeps the request it continues
+    setNow($, 'working', {
+      step: 'thinking',
+      since: Date.now(),
+      ...(headline || !S.now ? { headline: headline || 'continuing', prompt } : {}),
+    })
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) setNow($, 'done', { step: TURN_ENDS[e.reason] ?? 'answered' })
+    return next(e)
+  })
+
+  // A permission dialog: the agent waits on you until it is answered
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const what = describeToolCall({ tool: e.tool_name, ...(e.tool_input ?? {}) })
+    setNow($, 'waiting', { step: (e.agent_id ? 'subagent needs approval: ' : 'needs approval: ') + what, waitAgent: e.agent_id })
+    return next(e)
+  })
+
+  on('classic.SubagentStart', async ($, e, next) => {
+    await refreshAgents($)
+    return next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const a = S.agents[e.agent_id]
+    if (a) S.agents = { ...S.agents, [a.id]: { ...a, status: 'completed' } }
+    await refreshAgents($)
     return next(e)
   })
 
@@ -231,7 +293,9 @@ export function register(on, opts) {
   // ---- Tokens and the prompt cache ----------------------------------------
 
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined && S.now?.status === 'working') setNow($, 'working', { step: 'thinking' })
     const result = yield* next(e)
+    recordStep(e, result)
     if (result?.usage) await recordUsage($, e.agentId, result.usage)
     return result
   })
@@ -239,7 +303,7 @@ export function register(on, opts) {
   // ---- Force a task list --------------------------------------------------
 
   on('prompt.submit', async ($, e, next) => {
-    if (options.force_task_list === false) return next(e)
+    if (options.force_task_list !== true) return next(e)
     return next({ ...e, context: [...(e.context ?? []), TASK_NUDGE] })
   })
 
@@ -269,6 +333,8 @@ export function register(on, opts) {
     const E = $.ui.resolve(e)
     const now = Date.now()
     const redraw = () => $.ui.invalidate('ui.render')
+    // Read while drawing, so the pane is drawn again when swarm-mod writes it
+    const swarm = await readSwarm($)
 
     return renderDashboard(
       E,
@@ -281,14 +347,21 @@ export function register(on, opts) {
         ttlSource,
         usage,
         errorsOpen,
+        promptOpen,
         links,
         linkUi,
+        distUi,
+        swarm,
       },
       {
         refresh: (proc) => restartProcess($, proc),
         close: (proc) => closeProcess($, proc),
         toggleErrors: () => {
           errorsOpen = !errorsOpen
+          redraw()
+        },
+        togglePrompt: () => {
+          promptOpen = !promptOpen
           redraw()
         },
         rescan: () => scanProcesses($, true),
@@ -316,6 +389,15 @@ export function register(on, opts) {
           return withBusy($, 'renaming…', () => renameLink($, link, name))
         },
         unlink: (link) => withBusy($, 'unlinking…', () => unlinkFolder($, link)),
+        toggleSmallPct: () => {
+          distUi.showSmall = !distUi.showSmall
+          redraw()
+        },
+        togglePct: (kind) => {
+          if (distUi.shown.has(kind)) distUi.shown.delete(kind)
+          else distUi.shown.add(kind)
+          redraw()
+        },
       },
     )
   })
@@ -327,6 +409,15 @@ export function register(on, opts) {
 async function restore($) {
   const { value } = await $.state.get({ plugin: 'session-dashboard', key: 'snapshot' })
   if (value && typeof value === 'object') S = { ...emptySnapshot(), ...value }
+  // Saved before the whole prompt was kept: find it in the transcript
+  if (S.now?.headline && !S.now.prompt) {
+    try {
+      const prompt = promptFromMessages(await $.session.messages(), S.now.headline)
+      if (prompt) S.now = { ...S.now, prompt }
+    } catch {
+      // the one-line headline still shows
+    }
+  }
 }
 
 /** Saves the snapshot for the next hot reload and redraws the pane. */
@@ -367,7 +458,7 @@ async function refreshUsage($) {
 async function onTick($) {
   ticks += 1
   if (paneOpen) {
-    if (ticks % 2 === 0) await refreshUsage($)
+    if (ticks % 2 === 0) await Promise.all([refreshUsage($), refreshAgents($)])
     $.ui.invalidate('ui.render')
   }
   // Scan every 5 s while the pane is open, every 30 s otherwise
@@ -379,12 +470,20 @@ async function onTick($) {
 // Tool calls
 
 function afterToolCall($, e, result) {
+  // The tool (or the permission dialog before it) answered: back to work
+  if (S.now?.status === 'waiting' && S.now.waitAgent === e.agentId) S.now = { ...S.now, status: 'working', waitAgent: undefined, at: Date.now() }
   const error = classifyToolResult(e.tool, result)
   if (error) pushError(S, { at: Date.now(), tool: e.tool, agentId: e.agentId, ...error })
 
+  // What the tool answered goes back to the model with the agent's next request
+  const st = stepOf(e.agentId)
+  st.pending += estimateTokens(result?.text ?? result?.deny ?? '')
+  if (error) st.failedTools.add(e.tool)
+
   const ok = result && !result.deny && !result.isError
   if (ok) {
-    if (e.tool === 'TodoWrite' && e.agentId === undefined) applyTodoWrite(S, e.todos)
+    if (e.tool === 'ExitPlanMode' && e.agentId === undefined) void approvePlan($, result.result)
+    else if (e.tool === 'TodoWrite' && e.agentId === undefined) applyTodoWrite(S, e.todos)
     else if (e.tool === 'TaskCreate') applyTaskCreate(S, e, result.result)
     else if (e.tool === 'TaskUpdate') applyTaskUpdate(S, e)
     else if (e.tool === 'TaskList') applyTaskList(S, result.result)
@@ -393,7 +492,6 @@ function afterToolCall($, e, result) {
       for (const p of S.procs) if (p.taskId === id && p.status === 'running') p.status = 'stopped'
     }
   }
-
   if (ok && BACKGROUND_TOOLS.includes(e.tool)) {
     const taskId = backgroundIdOf(result)
     if (taskId || e.run_in_background) trackBackground($, e, taskId)
@@ -464,7 +562,96 @@ function reconcileBackground($, tasks) {
 }
 
 // ---------------------------------------------------------------------------
+// Plan, turns and agents
+
+/** A plan approved in plan mode: its text is in the result, or in its file. */
+async function approvePlan($, out) {
+  let text = typeof out?.plan === 'string' ? out.plan : ''
+  if (!text && out?.filePath) {
+    try {
+      text = await $.fs.read(out.filePath)
+    } catch {
+      // No plan to show
+    }
+  }
+  const { title, steps } = parsePlan(text)
+  if (!steps.length) return
+  S.plan = { title, steps, at: Date.now(), status: 'running' }
+  changed($)
+}
+
+const TURN_ENDS = { answer: 'answered', aborted: 'interrupted', error: 'stopped on an API error', refusal: 'refused' }
+
+/** Moves the main agent's status line; `fields` overrides headline, step or since. */
+function setNow($, status, fields = {}) {
+  const now = Date.now()
+  // waitAgent: whose tool call the wait is on (undefined for the main agent)
+  S.now = { headline: '', step: '', since: now, ...S.now, waitAgent: undefined, ...fields, status, at: now }
+  changed($)
+}
+
+/** A turn ended: the plan it carried out is done, and the distribution shows the split as of now. */
+function endTurn($) {
+  if (S.plan?.status === 'running') S.plan = { ...S.plan, status: 'done', doneAt: Date.now() }
+  const total = Object.values(S.mix).reduce((a, b) => a + b, 0)
+  if (total > 0) S.dist = { ...S.mix, at: Date.now(), turns: (S.dist?.turns ?? 0) + 1 }
+  changed($)
+}
+
+async function refreshAgents($) {
+  try {
+    const next = mergeAgents(S.agents, await $.agent.list(), Date.now(), 'swarm-mod')
+    if (JSON.stringify(next) !== JSON.stringify(S.agents)) {
+      S.agents = next
+      changed($)
+    }
+  } catch {
+    // Keep the last list
+  }
+}
+
+async function readSwarm($) {
+  try {
+    const { value } = await $.state.get({ plugin: 'swarm-mod', key: 'snapshot' })
+    return swarmRows(value)
+  } catch {
+    // swarm-mod isn't loaded
+    return []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tokens
+
+function stepOf(agentId) {
+  const key = agentId ?? 'main'
+  let st = steps.get(key)
+  if (!st) {
+    st = { turnId: null, index: -1, failed: false, pending: 0, failedTools: new Set() }
+    steps.set(key, st)
+  }
+  return st
+}
+
+/** Adds one model request to the running token split. */
+function recordStep(e, result) {
+  const st = stepOf(e.agentId)
+  if (!result?.usage) {
+    // No response at all: the request failed, and the next one resends it
+    if (result && result.stopReason === null) st.failed = true
+    return
+  }
+  const isRetry = st.failed || (st.turnId === e.turnId && st.index === e.index)
+  const { mix, pendingLeft } = splitUsage(result.usage, {
+    toolUses: result.toolUses,
+    pendingToolTokens: st.pending,
+    failedTools: st.failedTools,
+    isRetry,
+  })
+  S.mix = addMix(S.mix, mix)
+  Object.assign(st, { turnId: e.turnId, index: e.index, failed: false, pending: pendingLeft })
+  st.failedTools.clear()
+}
 
 async function recordUsage($, agentId, u) {
   const read = u.cache_read_input_tokens ?? 0

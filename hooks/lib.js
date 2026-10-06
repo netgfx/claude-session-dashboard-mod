@@ -12,6 +12,16 @@ export function emptySnapshot() {
     tasks: { source: null, items: [] },
     tokens: { main: emptyTokens('main'), agents: {} },
     cache: { lastAt: 0, read: 0, write: 0, input: 0, misses: 0, requests: 0, lastMiss: null },
+    // The plan last approved in plan mode: `{ title, steps, at, status }`
+    plan: null,
+    // Subagents seen this session, by id: `{ id, type, description, status, at }`
+    agents: {},
+    // What the main agent is doing: `{ status, headline, step, since, at }`,
+    // status 'working' | 'waiting' | 'done'; null before the first turn
+    now: null,
+    // Running token split by kind, and the copy the pane shows, taken when a turn ends
+    mix: emptyMix(),
+    dist: null,
   }
 }
 
@@ -57,6 +67,25 @@ export function fmtUntil(ms) {
 export function firstLine(text, max = 120) {
   const line = String(text ?? '').split(/\r?\n/).find((l) => l.trim()) ?? ''
   return line.trim().slice(0, max)
+}
+
+/**
+ * The whole prompt a request headline was cut from: the newest user message
+ * whose first line starts the same way. For a snapshot saved before prompts
+ * were kept. '' when none matches.
+ */
+export function promptFromMessages(messages, headline, max = 9000) {
+  if (!Array.isArray(messages) || !headline) return ''
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m?.role !== 'user' || typeof m.text !== 'string') continue
+    const text = m.text
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+      .replace(/\r\n/g, '\n')
+      .trim()
+    if (text && firstLine(text, 100) === headline) return text.slice(0, max)
+  }
+  return ''
 }
 
 /** Pads or cuts a string to exactly `n` columns. */
@@ -167,6 +196,131 @@ export function applyTaskList(snap, result) {
     source: 'task',
     items: tasks.map((t) => ({ id: t.id, subject: t.subject, status: t.status, activeForm: prev.get(t.id)?.activeForm })),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Plan and agents
+
+const MAX_PLAN_STEPS = 12
+export const MAX_AGENTS = 8
+
+/** Markdown inline marks off: `**a**` -> "a", "[x](y)" -> "x", "`c`" -> "c". */
+function plainText(text) {
+  return text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/(\*\*|__|`)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * The steps of a plan approved in plan mode, from its markdown: the top-level
+ * numbered items, else the `##` headings, else the top-level bullets.
+ * @returns `{ title, steps: string[] }`
+ */
+export function parsePlan(markdown) {
+  let title = ''
+  const numbered = []
+  const headings = []
+  const bullets = []
+  let isFenced = false
+  for (const line of String(markdown ?? '').split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) isFenced = !isFenced
+    if (isFenced) continue
+    let m
+    if (!title && (m = line.match(/^#\s+(.+)/))) title = plainText(m[1])
+    else if ((m = line.match(/^#{2,3}\s+(.+)/))) headings.push(plainText(m[1]))
+    else if ((m = line.match(/^ ?\d+[.)]\s+(?:\[[ xX]\]\s+)?(.+)/))) numbered.push(plainText(m[1]))
+    else if ((m = line.match(/^[-*+]\s+(?:\[[ xX]\]\s+)?(.+)/))) bullets.push(plainText(m[1]))
+  }
+  const steps = numbered.length >= 2 ? numbered : headings.length >= 2 ? headings : bullets.length ? bullets : [...numbered, ...headings]
+  return { title: title.replace(/^plan:\s*/i, ''), steps: steps.filter(Boolean).slice(0, MAX_PLAN_STEPS) }
+}
+
+/**
+ * Merges `$.agent.list()` into the subagents seen so far. Ones started by
+ * `skipPlugin` (swarm-mod, which lists its own) are left out; ones the list
+ * no longer has finished.
+ */
+export function mergeAgents(known, listed, now, skipPlugin) {
+  const out = { ...known }
+  const live = new Set()
+  for (const a of listed ?? []) {
+    if (!a?.id || (skipPlugin && a.spawnedBy === skipPlugin)) continue
+    live.add(a.id)
+    const prev = out[a.id]
+    out[a.id] = { id: a.id, type: a.type, description: a.description || a.name || '', status: a.status, at: prev?.at ?? now }
+  }
+  for (const id of Object.keys(out)) {
+    if (!live.has(id) && ['pending', 'running', 'waiting', 'idle'].includes(out[id].status)) out[id] = { ...out[id], status: 'completed' }
+  }
+  // The running ones, then the latest finished, up to MAX_AGENTS
+  const isLive = (a) => ['pending', 'running', 'waiting'].includes(a.status)
+  const kept = Object.values(out)
+    .sort((a, b) => Number(isLive(b)) - Number(isLive(a)) || b.at - a.at)
+    .slice(0, MAX_AGENTS)
+  return Object.fromEntries(kept.map((a) => [a.id, a]))
+}
+
+// Tools that block on the user until they answer
+export const WAIT_TOOLS = ['AskUserQuestion', 'ExitPlanMode']
+
+/** A tool call as a short line for the pane: "Bash · Run the tests", "Read · view.js". */
+export function describeToolCall(e) {
+  const tool = String(e?.tool ?? '?')
+  const mcp = tool.match(/^mcp__(.+?)__(.+)$/)
+  if (mcp) return mcp[1] + ' · ' + mcp[2]
+  const detail = (() => {
+    switch (tool) {
+      case 'Bash':
+      case 'PowerShell':
+      case 'Monitor':
+        return e.description || e.command
+      case 'Read':
+      case 'Edit':
+      case 'Write':
+      case 'NotebookEdit':
+        return baseName(e.file_path ?? e.notebook_path ?? '')
+      case 'Grep':
+      case 'Glob':
+        return e.pattern
+      case 'WebFetch':
+        return String(e.url ?? '').replace(/^https?:\/\//, '').split('/')[0]
+      case 'WebSearch':
+        return e.query
+      case 'Agent':
+      case 'Task':
+        return [e.subagent_type, e.description].filter(Boolean).join(' · ')
+      case 'Skill':
+        return e.skill
+      case 'AskUserQuestion':
+        return 'asking you a question'
+      case 'ExitPlanMode':
+        return 'plan ready for approval'
+      default:
+        return e.description
+    }
+  })()
+  const text = firstLine(detail ?? '', 80)
+  return text ? tool + ' · ' + text : tool
+}
+
+/** swarm-mod's snapshot as rows: `{ name, status, activity, tokens, pending }`. */
+export function swarmRows(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.order) || !snapshot.agents) return []
+  return snapshot.order
+    .map((k) => snapshot.agents[k])
+    .filter(Boolean)
+    .map((a) => {
+      const t = a.tokens ?? {}
+      return {
+        name: String(a.name ?? '?'),
+        status: String(a.status ?? ''),
+        activity: firstLine(a.activity || a.task || '', 80),
+        tokens: (t.input ?? 0) + (t.output ?? 0) + (t.cacheRead ?? 0) + (t.cacheWrite ?? 0),
+        pending: a.pending ? (a.pending.kind === 'question' ? 'question' : 'approval') : null,
+      }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -405,4 +559,148 @@ export function gitignoreRemove(text, name) {
     if (at > 0 && lines[at - 1] === '' && (at === lines.length || lines[at] === '')) lines.splice(at - 1, 1)
   }
   return lines.length ? lines.join(eol) + eol : ''
+}
+
+// ---------------------------------------------------------------------------
+// Token distribution
+
+export const MIX_KINDS = ['input', 'output', 'tool', 'cacheRead', 'cacheWrite', 'retry']
+
+export function emptyMix() {
+  return { input: 0, output: 0, tool: 0, cacheRead: 0, cacheWrite: 0, retry: 0 }
+}
+
+/** Rough token count of a piece of text or a value's JSON: ~4 characters a token. */
+export function estimateTokens(value) {
+  if (value === undefined || value === null) return 0
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? ''
+  return Math.ceil(text.length / 4)
+}
+
+/**
+ * Splits one model request's usage into the distribution's kinds; the parts add up
+ * to the request's total. Tool use is the output spent writing tool calls plus the
+ * tool results the request sends; retries are a request resent after a failed one,
+ * and the calls that redo a tool that just failed.
+ * @param u the API usage
+ * @param o `{ toolUses, pendingToolTokens, failedTools: Set<name>, isRetry }`
+ * @returns `{ mix, pendingLeft }`: the parts, and the tool-result tokens not yet sent
+ */
+export function splitUsage(u, o = {}) {
+  const input = u.input_tokens ?? 0
+  const output = u.output_tokens ?? 0
+  const cacheRead = u.cache_read_input_tokens ?? 0
+  const cacheWrite = u.cache_creation_input_tokens ?? 0
+  const mix = emptyMix()
+  const pending = Math.max(0, o.pendingToolTokens ?? 0)
+  if (o.isRetry) {
+    mix.retry = input + output + cacheRead + cacheWrite
+    return { mix, pendingLeft: pending }
+  }
+  // Tool results are new content: written to the cache, or sent uncached
+  const fromWrite = Math.min(pending, cacheWrite)
+  const fromInput = Math.min(pending - fromWrite, input)
+  let toolOut = 0
+  let retryOut = 0
+  for (const use of o.toolUses ?? []) {
+    const n = estimateTokens(use?.input) + 10
+    if (o.failedTools?.has(use?.name)) retryOut += n
+    else toolOut += n
+  }
+  // Never more than the output the request reported
+  const over = toolOut + retryOut - output
+  if (over > 0) {
+    const cut = Math.min(over, toolOut)
+    toolOut -= cut
+    retryOut -= over - cut
+  }
+  mix.input = input - fromInput
+  mix.cacheRead = cacheRead
+  mix.cacheWrite = cacheWrite - fromWrite
+  mix.output = output - toolOut - retryOut
+  mix.tool = toolOut + fromWrite + fromInput
+  mix.retry = retryOut
+  return { mix, pendingLeft: pending - fromWrite - fromInput }
+}
+
+export function addMix(a, b) {
+  const out = emptyMix()
+  for (const k of MIX_KINDS) out[k] = (a?.[k] ?? 0) + (b?.[k] ?? 0)
+  return out
+}
+
+/** 0.4 -> "0.4%", 42.3 -> "42%"; a share under 0.1 is "<0.1%". */
+export function fmtPct(pct) {
+  if (!(pct > 0)) return '0%'
+  if (pct < 0.1) return '<0.1%'
+  if (pct < 10) return pct.toFixed(1).replace(/\.0$/, '') + '%'
+  return Math.round(pct) + '%'
+}
+
+/**
+ * Which slice each pixel of a pie lies in, clockwise from 12 o'clock.
+ * @param values the slices' sizes
+ * @param size the pie's diameter in pixels
+ * @returns rows of slice indexes, -1 outside the pie
+ */
+export function pieGrid(values, size) {
+  const total = values.reduce((a, b) => a + Math.max(0, b), 0)
+  const ends = []
+  let acc = 0
+  for (const v of values) {
+    acc += Math.max(0, v)
+    ends.push(total > 0 ? acc / total : 0)
+  }
+  const c = size / 2
+  const r = c - 0.2
+  const grid = []
+  for (let y = 0; y < size; y++) {
+    const row = []
+    for (let x = 0; x < size; x++) {
+      const dx = x + 0.5 - c
+      const dy = y + 0.5 - c
+      if (total <= 0 || dx * dx + dy * dy > r * r) {
+        row.push(-1)
+        continue
+      }
+      let f = Math.atan2(dx, -dy) / (2 * Math.PI)
+      if (f < 0) f += 1
+      let i = ends.findIndex((end, k) => f < end && values[k] > 0)
+      // Rounding at the very end of the circle: the last slice with a size
+      if (i < 0) i = values.reduce((last, v, k) => (v > 0 ? k : last), -1)
+      row.push(i)
+    }
+    grid.push(row)
+  }
+  return grid
+}
+
+/**
+ * Where a slice's label fits inside the pie: a run of `length` cells, each with both
+ * of its half-block pixels in the slice, near the middle of the slice's arc.
+ * @param grid from `pieGrid`; a cell is two pixel rows
+ * @returns `{ row, col }` in cells, or null when the slice is too narrow for it
+ */
+export function labelSpot(grid, values, index, length) {
+  const total = values.reduce((a, b) => a + Math.max(0, b), 0)
+  if (!(values[index] > 0) || total <= 0) return null
+  const before = values.slice(0, index).reduce((a, b) => a + Math.max(0, b), 0)
+  const angle = ((before + values[index] / 2) / total) * 2 * Math.PI
+  const size = grid.length
+  const c = size / 2
+  const fits = (row, col) => {
+    for (let x = col; x < col + length; x++) {
+      if (grid[row * 2]?.[x] !== index || grid[row * 2 + 1]?.[x] !== index) return false
+    }
+    return true
+  }
+  // A slice holding nearly the whole pie can take its label at the center
+  for (const k of values[index] / total > 0.75 ? [0, 0.3, 0.55] : [0.55, 0.4, 0.7]) {
+    const px = c + Math.sin(angle) * k * c
+    const py = c - Math.cos(angle) * k * c
+    const row = Math.min(Math.floor(size / 2) - 1, Math.max(0, Math.floor(py / 2)))
+    const mid = Math.round(px - length / 2)
+    for (const col of [mid, mid - 1, mid + 1]) if (col >= 0 && col + length <= size && fits(row, col)) return { row, col }
+  }
+  return null
 }
