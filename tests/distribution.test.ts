@@ -120,3 +120,37 @@ test('Total Distribution appears once a turn ends and updates only at the next t
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^100k tokens · 2 turns$/ })).toBeDefined()
 })
+
+test('Total Distribution appears when only turn.complete ends the turn, and a turn ending both ways counts once', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Stop', () => ({}))
+  on('turn.step', async function* ($: any, e: any) {
+    yield { kind: 'text', index: 0, text: 'ok' }
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: usage(9000, 1000, 50, 400) }
+  })
+  let index = 0
+  const step = async () => {
+    const stream = $.turn.step({ turnId: 't', index: index++, model: 'claude-test', messageCount: 1 })
+    let s = await stream.next()
+    while (s.done !== true) s = await stream.next()
+  }
+
+  await step()
+  await $.turn.complete({ turnId: 't', reason: 'answer', isAborted: false } as any)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'TOTAL DISTRIBUTION' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· 1 turn$/ })).toBeDefined()
+  await ui.unmount()
+
+  // The same turn's Stop after it adds no turn
+  await stop($)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /· 1 turn$/ })).toBeDefined()
+  await ui.unmount()
+
+  // A Stop whose background list is malformed still ends the next turn
+  await step()
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [null] } as any)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /· 2 turns$/ })).toBeDefined()
+})

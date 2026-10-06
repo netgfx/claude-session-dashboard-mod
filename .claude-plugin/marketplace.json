@@ -3,14 +3,14 @@
   "owner": { "name": "netgfx" },
   "metadata": {
     "description": "Marketplace for the session-dashboard Claude Code mod",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "session-dashboard",
       "source": "./",
       "description": "A side pane for the current session: prompt cache hot/cold, tool calls and errors, background commands with restart and stop, the live task list, and token usage for the main agent and subagents",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": { "name": "djmid" },
       "homepage": "https://github.com/netgfx/claude-session-dashboard-mod",
       "repository": "https://github.com/netgfx/claude-session-dashboard-mod",

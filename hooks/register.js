@@ -107,6 +107,9 @@ const steps = new Map()
 // Total distribution: whether the narrow slices' shares show, and the ledger
 // entries pressed to show theirs
 let distUi = { showSmall: false, shown: new Set() }
+// A main-agent turn is under way and not yet counted: both turn.complete and
+// classic.Stop end a turn, and whichever comes first counts it
+let isTurnOpen = false
 // Folders linked into the workspace root, kept in $.store per workspace
 let links = []
 let linkRoot
@@ -238,7 +241,11 @@ export function register(on, opts) {
 
   // At the end of each response, the engine lists the background work still in flight
   on('classic.Stop', async ($, e, next) => {
-    reconcileBackground($, e.background_tasks)
+    try {
+      reconcileBackground($, e.background_tasks)
+    } catch {
+      // An unexpected task list must not keep the turn from ending
+    }
     if (S.now && S.now.status !== 'done') setNow($, 'done', { step: 'answered' })
     endTurn($)
     return next(e)
@@ -257,11 +264,15 @@ export function register(on, opts) {
       since: Date.now(),
       ...(headline || !S.now ? { headline: headline || 'continuing', prompt } : {}),
     })
+    isTurnOpen = true
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) setNow($, 'done', { step: TURN_ENDS[e.reason] ?? 'answered' })
+    if (e.agentId === undefined) {
+      setNow($, 'done', { step: TURN_ENDS[e.reason] ?? 'answered' })
+      endTurn($)
+    }
     return next(e)
   })
 
@@ -293,6 +304,7 @@ export function register(on, opts) {
   // ---- Tokens and the prompt cache ----------------------------------------
 
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) isTurnOpen = true
     if (e.agentId === undefined && S.now?.status === 'working') setNow($, 'working', { step: 'thinking' })
     const result = yield* next(e)
     recordStep(e, result)
@@ -594,7 +606,8 @@ function setNow($, status, fields = {}) {
 function endTurn($) {
   if (S.plan?.status === 'running') S.plan = { ...S.plan, status: 'done', doneAt: Date.now() }
   const total = Object.values(S.mix).reduce((a, b) => a + b, 0)
-  if (total > 0) S.dist = { ...S.mix, at: Date.now(), turns: (S.dist?.turns ?? 0) + 1 }
+  if (total > 0) S.dist = { ...S.mix, at: Date.now(), turns: (S.dist?.turns ?? 0) + (isTurnOpen || !S.dist ? 1 : 0) }
+  isTurnOpen = false
   changed($)
 }
 
