@@ -476,6 +476,8 @@ async function onTick($) {
   // Scan every 5 s while the pane is open, every 30 s otherwise
   const hasRunning = S.procs.some((p) => p.status === 'running')
   if (hasRunning && ticks % (paneOpen ? 5 : 30) === 0) await scanProcesses($, false)
+  // Links made or removed outside the dashboard show up within 10 s while the pane is open
+  if (paneOpen && ticks % 10 === 0 && !linkUi.busy) await syncLinks($).catch(() => {})
 }
 
 // ---------------------------------------------------------------------------
@@ -863,19 +865,41 @@ async function rootEntries($, root) {
   return { names: entries.map((x) => x.name), linkNames: new Set(entries.filter((x) => x.isLink).map((x) => x.name)) }
 }
 
-/** The saved list, minus any link deleted outside the dashboard. */
+/** The saved list, matched to what the workspace root holds now. */
 async function loadLinks($) {
   try {
     linkRoot = undefined
     const root = await workspaceRoot($)
     const saved = await $.store.get(linksKey(root))
-    const list = Array.isArray(saved) ? saved : []
-    const { linkNames } = await rootEntries($, root)
-    links = list.filter((l) => linkNames.has(l.name))
-    if (links.length !== list.length) await saveLinks($)
+    links = Array.isArray(saved) ? saved : []
+    await syncLinks($)
   } catch {
     links = []
   }
+}
+
+/**
+ * Matches the list to the workspace root: drops links deleted outside the
+ * dashboard and adds folder links made outside it (`found`), target resolved.
+ */
+async function syncLinks($) {
+  const root = await workspaceRoot($)
+  const entries = await $.fs.list(root).catch(() => undefined)
+  if (!entries) return
+  const linkNames = new Set(entries.filter((x) => x.isLink).map((x) => x.name))
+  const kept = links.filter((l) => linkNames.has(l.name))
+  const known = new Set(kept.map((l) => l.name))
+  const found = []
+  for (const x of entries) {
+    if (!x.isLink || x.kind !== 'dir' || known.has(x.name)) continue
+    const stat = await $.fs.stat(joinPath(root, x.name, isWindows), { resolve: true }).catch(() => undefined)
+    if (stat?.kind === 'dir' && stat.realPath) found.push({ name: x.name, target: stat.realPath, addedAt: Date.now(), found: true })
+  }
+  found.sort((a, b) => a.name.localeCompare(b.name))
+  // A busy section is mid-change: leave its list alone until it is done
+  if (linkUi.busy || (kept.length === links.length && !found.length)) return
+  links = [...kept, ...found]
+  await saveLinks($)
 }
 
 async function saveLinks($) {
@@ -991,7 +1015,11 @@ async function renameLink($, link, rawName) {
     await makeLink($, link.target, newPath)
     await removeLink($, oldPath)
   }
-  await editGitignore($, root, (text) => gitignoreAdd(gitignoreRemove(text, link.name), name))
+  await editGitignore($, root, (text) => {
+    const without = gitignoreRemove(text, link.name)
+    // A link made outside the dashboard keeps the .gitignore it had: no entry, none added
+    return link.found && without === text ? text : gitignoreAdd(without, name)
+  })
   links = links.map((l) => (l.name === link.name ? { ...l, name } : l))
   await saveLinks($)
   $.ui.toast('Renamed ' + link.name + ' → ' + name)

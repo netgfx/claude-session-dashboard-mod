@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import { baseName, cleanPath, gitignoreAdd, gitignoreRemove, isValidLinkName, isWithin, uniqueName } from '../hooks/lib.js'
 
 const PANE = {
@@ -78,16 +78,20 @@ function stubWorkspace(on: any, picked: () => any) {
     files[unix(e.path)] = e.text
     return { value: undefined }
   })
-  on('fs.stat', ($: any, e: any) =>
-    unix(e.path) === '/Users/me/notes' || unix(e.path) === '/work/src'
+  on('fs.stat', ($: any, e: any) => {
+    const path = unix(e.path)
+    const linked = path.startsWith('/work/') ? linksOnDisk.get(path.slice('/work/'.length)) : undefined
+    if (linked) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, realPath: linked } }
+    return path === '/Users/me/notes' || path === '/work/src'
       ? { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
-      : { deny: 'ENOENT' },
-  )
+      : { deny: 'ENOENT' }
+  })
   on('fs.list', () => ({
     value: [
       { name: '.gitignore', kind: 'file', size: 1, mtimeMs: 0, isLink: false },
       { name: 'src', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
-      ...[...linksOnDisk.keys()].map((name) => ({ name, kind: 'other', size: 0, mtimeMs: 0, isLink: true })),
+      // A link to a folder lists as that folder
+      ...[...linksOnDisk.keys()].map((name) => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: true })),
     ],
   }))
   on('process.run', ($: any, e: any) => {
@@ -203,4 +207,44 @@ test('linking the workspace itself or a missing folder is refused', async ($, on
   expect(w.runs.some((r) => r[0] === 'ln')).toBe(false)
   expect(w.toasts.some((t) => /is the workspace, inside it/.test(t))).toBe(true)
   expect(w.toasts.some((t) => /not a folder: \/nowhere/.test(t))).toBe(true)
+})
+
+// What session.start needs beyond the workspace stub
+function stubSession(on: any) {
+  mock.clock(on)
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.usage', () => ({ value: null }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: undefined }))
+}
+
+test('folder links made outside the dashboard are listed, and ✕ / ✎ leave .gitignore alone', async ($, on) => {
+  const w = stubWorkspace(on, () => null)
+  stubSession(on)
+  w.linksOnDisk.set('shared', '/Users/me/shared')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^shared/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '→ /Users/me/shared' })).toBeDefined()
+  expect(w.store['links:/work']).toEqual([expect.objectContaining({ name: 'shared', target: '/Users/me/shared', found: true })])
+
+  // It had no .gitignore entry, so a rename adds none
+  await ui.press({ key: 'link-edit-shared' })
+  await ui.input({ key: 'link-name-shared', text: 'common' })
+  expect([...w.linksOnDisk.keys()]).toEqual(['common'])
+  expect(w.files['/work/.gitignore']).toBe('node_modules/\n')
+
+  await ui.press({ key: 'link-remove-common' })
+  expect(w.runs.filter((r) => r[0] === 'rm').map((r) => r[1])).toEqual(['/work/shared', '/work/common'])
+  expect(w.files['/work/.gitignore']).toBe('node_modules/\n')
+  expect(await ui.find({ type: 'Text', text: /^None\. Press \+/ })).toBeDefined()
+})
+
+test('a saved link deleted outside the dashboard drops off the list', async ($, on) => {
+  const w = stubWorkspace(on, () => null)
+  stubSession(on)
+  w.store['links:/work'] = [{ name: 'gone', target: '/Users/me/gone', addedAt: 0 }]
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  expect(w.store['links:/work']).toEqual([])
 })
