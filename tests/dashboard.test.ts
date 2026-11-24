@@ -141,7 +141,6 @@ test('a background command shows in the table with its pid and port, and close s
   const toolCalls: any[] = []
   on('session.start', () => ({ cwd: 'C:\\work' }))
   on('session.cwd', () => ({ value: 'C:\\work' }))
-  on('session.authorize', () => ({ value: { handle: 'h', kind: 'bearer' } }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('command.register', () => ({ value: undefined }))
@@ -237,9 +236,8 @@ function stubStart(on: any, opened: any[], toasts: string[], usageValue: any = n
   mock.clock(on)
   // Beneath the mod's AbovePrompt hook: the engine's own (empty) band
   on('ui.render', ($: any, e: any) => $.ui.resolve(e).Box({}))
-  on('session.start', () => ({ cwd: 'C:\work' }))
-  on('session.cwd', () => ({ value: 'C:\work' }))
-  on('session.authorize', () => ({ value: { handle: 'h', kind: 'bearer' } }))
+  on('session.start', () => ({ cwd: 'C:\\work' }))
+  on('session.cwd', () => ({ value: 'C:\\work' }))
   on('session.usage', () => ({ value: usageValue }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', ($: any, e: any) => {
@@ -256,7 +254,7 @@ function stubStart(on: any, opened: any[], toasts: string[], usageValue: any = n
 test('auto-open waits for the fullscreen layout so the pane docks on the right', async ($, on) => {
   const opened: any[] = []
   stubStart(on, opened, [])
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\work' } as any)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
   expect(opened.length).toBe(0)
   await $.ui.mount(band(true) as any)
   expect(opened.some((o) => o.id === 'session-dashboard')).toBe(true)
@@ -265,7 +263,7 @@ test('auto-open waits for the fullscreen layout so the pane docks on the right',
 test('auto-open never opens the pane above the prompt on the main screen', async ($, on) => {
   const opened: any[] = []
   stubStart(on, opened, [])
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\work' } as any)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
   await $.ui.mount(band(false) as any)
   expect(opened.length).toBe(0)
 })
@@ -274,7 +272,7 @@ test('/dashboard on the main screen explains instead of opening above the prompt
   const opened: any[] = []
   const toasts: string[] = []
   stubStart(on, opened, toasts)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\work' } as any)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
   await $.command.run({ command: 'dashboard', args: '', presentation: { isFullscreen: false, columns: 200 } } as any)
   expect(opened.length).toBe(0)
   expect(toasts.some((t) => /fullscreen/.test(t))).toBe(true)
@@ -292,7 +290,7 @@ test('usage limits show a bar per window, and none when a window is unused', asy
       { kind: 'seven_day', percentUsed: 40, resetsAt: new Date(Date.now() + 3 * 86400_000 + 5 * 3600_000).toISOString() },
     ],
   })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\work' } as any)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
   await $.command.run({ command: 'dashboard', args: '', presentation: { isFullscreen: true, columns: 200 } } as any)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -301,4 +299,46 @@ test('usage limits show a bar per window, and none when a window is unused', asy
   expect(await ui.find({ type: 'Text', text: /^ *40%$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^█{10,} *$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /3d [45]h$/ })).toBeDefined()
+})
+
+test('the cache TTL is 60 minutes on a subscription (plan windows in usage), 5 otherwise', async ($, on) => {
+  let usageValue: any = { startedAt: 0, context: { percent: 1, window: 200000 }, rateLimits: [] }
+  on('session.usage', () => ({ value: usageValue }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: '/work' }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: undefined }))
+  on('fs.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: '/work' }))
+  stubStep(on, () => usage(900, 100))
+  mock.clock(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  await step($)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /TTL 5m$/ })).toBeDefined()
+  await ui.unmount()
+
+  // The first response of a subscription session brings its plan windows
+  usageValue = { ...usageValue, rateLimits: [{ kind: 'five_hour', percentUsed: 3 }] }
+  await step($)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /TTL 60m \(auto\)$/ })).toBeDefined()
+})
+
+test('cache_ttl_minutes overrides the TTL whatever usage says', { options: { cache_ttl_minutes: 15 } }, async ($, on) => {
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [{ kind: 'five_hour', percentUsed: 3 }] } }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: '/work' }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: undefined }))
+  on('fs.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: '/work' }))
+  stubStep(on, () => usage(900, 100))
+  mock.clock(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  await step($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /TTL 15m$/ })).toBeDefined()
 })

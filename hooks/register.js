@@ -33,6 +33,7 @@ import {
   pushError,
   splitUsage,
   swarmRows,
+  ttlFromUsage,
   uniqueName,
   WAIT_TOOLS,
 } from './lib.js'
@@ -308,6 +309,8 @@ export function register(on, opts) {
     if (e.agentId === undefined && S.now?.status === 'working') setNow($, 'working', { step: 'thinking' })
     const result = yield* next(e)
     recordStep(e, result)
+    // The response just brought the rate-limit windows that tell the cache TTL
+    if (result?.usage && e.agentId === undefined && ttlSource === 'default') await refreshUsage($)
     if (result?.usage) await recordUsage($, e.agentId, result.usage)
     return result
   })
@@ -442,29 +445,30 @@ async function detectEnvironment($) {
   const cwd = await $.session.cwd()
   isWindows = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\')
 
-  const configured = Number(options.cache_ttl_minutes ?? 0)
-  if (configured > 0) {
-    ttlMs = configured * 60_000
-    ttlSource = 'config'
-    return
-  }
-  // Subscription (OAuth) sessions get the 1-hour prompt cache; API keys the 5-minute one
-  try {
-    const auth = await $.session.authorize()
-    ttlMs = auth?.kind === 'bearer' ? 60 * 60_000 : 5 * 60_000
-    ttlSource = 'auto'
-  } catch {
-    ttlMs = 5 * 60_000
-    ttlSource = 'default'
-  }
+  // The TTL starts at the configured value or 5 minutes, and moves to 60 once
+  // usage reports a subscription's plan windows (see refreshUsage)
+  setTtl(null)
+  await refreshUsage($)
 }
 
+/**
+ * Reads the status line's figures. Subscription sessions get the 1-hour prompt
+ * cache and report plan rate-limit windows; API-key sessions get the 5-minute
+ * one and report none. `cache_ttl_minutes` above 0 overrides the guess.
+ */
 async function refreshUsage($) {
   try {
     usage = await $.session.usage()
+    setTtl(usage)
   } catch {
     // Keep the last figures
   }
+}
+
+function setTtl(u) {
+  const t = ttlFromUsage(u, options.cache_ttl_minutes)
+  ttlMs = t.ttlMs
+  ttlSource = t.ttlSource
 }
 
 async function onTick($) {

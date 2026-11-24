@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { classifyToolResult, matchProcess, parseNetstat, parseProcessList, parseTaskNotification, promptFromMessages } from '../hooks/lib.js'
+import { classifyToolResult, matchProcess, parseNetstat, parseProcessList, parseTaskNotification, promptFromMessages, ttlFromUsage } from '../hooks/lib.js'
 
 // Captured from a real Windows session: Claude Code's Bash tool running `python -m http.server 8765` in the background
 const SHELL =
@@ -52,4 +52,13 @@ test('promptFromMessages finds the whole prompt a headline was cut from', () => 
   expect(promptFromMessages(messages, long.slice(0, 100))).toBe(long + '\nand a way to close it again (collapse)')
   expect(promptFromMessages(messages, 'not there')).toBe('')
   expect(promptFromMessages(undefined, 'x')).toBe('')
+})
+
+test('ttlFromUsage: config first, then plan windows mean a subscription, else 5 minutes', () => {
+  const plan = { rateLimits: [{ kind: 'seven_day', percentUsed: 1 }] }
+  expect(ttlFromUsage(plan, 0)).toEqual({ ttlMs: 3_600_000, ttlSource: 'auto' })
+  expect(ttlFromUsage({ rateLimits: [] }, 0)).toEqual({ ttlMs: 300_000, ttlSource: 'default' })
+  expect(ttlFromUsage({ rateLimits: [{ kind: 'spend_limit', percentUsed: 1 }] }, 0)).toEqual({ ttlMs: 300_000, ttlSource: 'default' })
+  expect(ttlFromUsage(null, undefined)).toEqual({ ttlMs: 300_000, ttlSource: 'default' })
+  expect(ttlFromUsage(plan, 10)).toEqual({ ttlMs: 600_000, ttlSource: 'config' })
 })

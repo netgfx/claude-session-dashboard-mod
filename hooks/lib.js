@@ -338,6 +338,23 @@ export function cacheStatus(cache, now, ttlMs) {
   return { isHot: remainingMs > 0, remainingMs, hitRate, lastMiss: cache.lastMiss ?? null, isNew: false }
 }
 
+// Plan rate-limit windows that only a Claude subscription reports
+const PLAN_WINDOWS = ['five_hour', 'seven_day']
+
+/**
+ * The prompt cache TTL: `cache_ttl_minutes` when it is above 0, else 60 minutes
+ * when `$.session.usage()` reports a subscription's plan windows (five_hour,
+ * seven_day), else 5 minutes (an API key, a gateway, or no reading yet).
+ * @returns `{ ttlMs, ttlSource }`, ttlSource 'config' | 'auto' | 'default'
+ */
+export function ttlFromUsage(usage, configuredMinutes) {
+  const configured = Number(configuredMinutes ?? 0)
+  if (configured > 0) return { ttlMs: configured * 60_000, ttlSource: 'config' }
+  const limits = Array.isArray(usage?.rateLimits) ? usage.rateLimits : []
+  if (limits.some((r) => PLAN_WINDOWS.includes(r?.kind))) return { ttlMs: 60 * 60_000, ttlSource: 'auto' }
+  return { ttlMs: 5 * 60_000, ttlSource: 'default' }
+}
+
 // ---------------------------------------------------------------------------
 // Processes
 
