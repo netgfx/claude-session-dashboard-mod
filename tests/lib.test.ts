@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { classifyToolResult, matchProcess, parseNetstat, parseProcessList, parseTaskNotification, promptFromMessages, ttlFromUsage } from '../hooks/lib.js'
+import { classifyToolResult, descendantsOf, matchProcess, parseNetstat, parseProcessList, parseScanRoot, parseTaskNotification, portsOf, promptFromMessages, ttlFromUsage } from '../hooks/lib.js'
 
 // Captured from a real Windows session: Claude Code's Bash tool running `python -m http.server 8765` in the background
 const SHELL =
@@ -61,4 +61,25 @@ test('ttlFromUsage: config first, then plan windows mean a subscription, else 5 
   expect(ttlFromUsage({ rateLimits: [{ kind: 'spend_limit', percentUsed: 1 }] }, 0)).toEqual({ ttlMs: 300_000, ttlSource: 'default' })
   expect(ttlFromUsage(null, undefined)).toEqual({ ttlMs: 300_000, ttlSource: 'default' })
   expect(ttlFromUsage(plan, 10)).toEqual({ ttlMs: 600_000, ttlSource: 'config' })
+})
+
+test('descendantsOf keeps the process tree under Claude Code and nothing else', () => {
+  const out = 'root\t8200\r\n' + PROCS
+  expect(parseScanRoot(out)).toBe(8200)
+  expect(parseScanRoot(PROCS)).toBe(0)
+  const mine = descendantsOf(parseProcessList(out, true), parseScanRoot(out))
+  expect(mine.map((p) => p.pid)).toEqual([13504, 12548])
+  // No root, nothing at all
+  expect(descendantsOf(parseProcessList(PROCS, true), 0)).toEqual([])
+  // A parent loop ends
+  expect(descendantsOf([{ pid: 2, ppid: 3, cmd: '' }, { pid: 3, ppid: 2, cmd: '' }, { pid: 4, ppid: 1, cmd: '' }], 1).map((p) => p.pid)).toEqual([4])
+  expect([...portsOf(parseNetstat(NETSTAT), [1, 2])]).toEqual([])
+  expect([...portsOf(parseNetstat(NETSTAT), [12548])]).toEqual([[12548, [8765]]])
+})
+
+test('parseProcessList reads ps rows with and without a command line', () => {
+  expect(parseProcessList('  100    50 /bin/bash -c x\n   50     1\n', false)).toEqual([
+    { pid: 100, ppid: 50, cmd: '/bin/bash -c x' },
+    { pid: 50, ppid: 1, cmd: '' },
+  ])
 })

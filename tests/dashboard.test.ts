@@ -135,12 +135,9 @@ test('a request that misses a warm cache is flagged as invalidated', async ($, o
   expect(await ui.find({ type: 'Text', text: /invalidated/ })).toBeDefined()
 })
 
-test('a background command shows in the table with its pid and port, and close stops it', async ($, on) => {
-  const clock = mock.clock(on)
-  const runs: string[][] = []
-  const toolCalls: any[] = []
-  on('session.start', () => ({ cwd: 'C:\\work' }))
-  on('session.cwd', () => ({ value: 'C:\\work' }))
+function stubBackground(on: any, cwd: string, toolCalls: any[]) {
+  on('session.start', () => ({ cwd }))
+  on('session.cwd', () => ({ value: cwd }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('command.register', () => ({ value: undefined }))
@@ -150,6 +147,13 @@ test('a background command shows in the table with its pid and port, and close s
     if (e.tool === 'Bash') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' }, text: 'started' }
     return { result: { message: 'stopped', task_id: e.task_id, task_type: 'shell' }, text: 'ok' }
   })
+}
+
+test('a background command shows in the table with its pid and port, and close stops it (Windows)', async ($, on) => {
+  const clock = mock.clock(on)
+  const runs: string[][] = []
+  const toolCalls: any[] = []
+  stubBackground(on, 'C:\\work', toolCalls)
   on('process.run', ($: any, e: any) => {
     runs.push([...e.argv])
     if (e.argv[0] === 'powershell') {
@@ -158,7 +162,11 @@ test('a background command shows in the table with its pid and port, and close s
           exitCode: 0,
           stderr: '',
           stdout: [
-            '100\t1\tC:\\Program Files\\Git\\bin\\bash.exe -c "eval \'dotnet run\' < /dev/null"',
+            // Claude Code is pid 50. The scan prints only its tree; the rows of
+            // other processes here check that the mod drops them all the same
+            'root\t50',
+            '900\t1\t"C:\\Program Files\\dotnet\\dotnet.exe" run',
+            '100\t50\tC:\\Program Files\\Git\\bin\\bash.exe -c "eval \'dotnet run\' < /dev/null"',
             '200\t100\t"C:\\Program Files\\dotnet\\dotnet.exe" run',
             '300\t200\tC:\\app\\bin\\Debug\\App.exe',
             '400\t1\tnotepad.exe',
@@ -167,7 +175,13 @@ test('a background command shows in the table with its pid and port, and close s
       }
     }
     if (e.argv[0] === 'netstat') {
-      return { value: { exitCode: 0, stderr: '', stdout: '  TCP    0.0.0.0:5000    0.0.0.0:0    LISTENING    300\r\n  TCP    [::]:5000    [::]:0    LISTENING    300\r\n' } }
+      return {
+        value: {
+          exitCode: 0,
+          stderr: '',
+          stdout: '  TCP    0.0.0.0:6000    0.0.0.0:0    LISTENING    900\r\n  TCP    0.0.0.0:5000    0.0.0.0:0    LISTENING    300\r\n  TCP    [::]:5000    [::]:0    LISTENING    300\r\n',
+        },
+      }
     }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
@@ -182,11 +196,62 @@ test('a background command shows in the table with its pid and port, and close s
   // The pid shown is the process holding the port, under the shell that ran the command
   expect(await ui.find({ type: 'Text', text: /^300 / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^5000/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^900 |^6000/ })).toBeUndefined()
 
   await ui.press({ key: 'close-bg1' })
   expect(toolCalls.some((c) => c.tool === 'TaskStop' && c.task_id === 'bg1')).toBe(true)
-  // Kills the tree from the shell down
+  // Kills the tree from the shell down, never the other dotnet run
   expect(runs.some((r) => r[0] === 'taskkill' && r.includes('100'))).toBe(true)
+  expect(runs.some((r) => r[0] === 'taskkill' && r.includes('900'))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /\(stopped\)/ })).toBeDefined()
+})
+
+test('a background command shows in the table with its pid and port, and close stops it (macOS, Linux)', async ($, on) => {
+  const clock = mock.clock(on)
+  const runs: string[][] = []
+  const toolCalls: any[] = []
+  stubBackground(on, '/work', toolCalls)
+  // Claude Code is pid 50; 900 is someone else's `dotnet run`
+  const rows: Record<number, string> = {
+    100: "  100    50 /bin/bash -c eval 'dotnet run' < /dev/null",
+    200: '  200   100 dotnet run',
+    300: '  300   200 /app/bin/Debug/App',
+  }
+  on('process.run', ($: any, e: any) => {
+    runs.push([...e.argv])
+    const argv = e.argv.join(' ')
+    if (argv === 'sh -c echo $PPID') return { value: { exitCode: 0, stderr: '', stdout: '50\n' } }
+    if (argv === 'ps -A -o pid=,ppid=') {
+      return { value: { exitCode: 0, stderr: '', stdout: ['    1     0', '   50     1', '  100    50', '  200   100', '  300   200', '  900     1', ''].join('\n') } }
+    }
+    if (e.argv[0] === 'ps') {
+      const pids = e.argv[e.argv.indexOf('-p') + 1].split(',').map(Number)
+      // Answers for the pids asked, plus the foreign process as if its pid had been reused
+      return { value: { exitCode: 0, stderr: '', stdout: [...pids.map((p: number) => rows[p]), '  900     1 dotnet run', ''].join('\n') } }
+    }
+    if (e.argv[0] === 'lsof') return { value: { exitCode: 0, stderr: '', stdout: 'p900\nn*:6000\np300\nn*:5000\n' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'dotnet run', run_in_background: true })
+  await clock.advance(1600)
+
+  // Command lines are read for Claude Code's own tree only, never with -A
+  const asked = runs.find((r) => r[0] === 'ps' && r.includes('-p'))!
+  expect(asked[asked.indexOf('-p') + 1]).toBe('100,200,300')
+  expect(asked.join(' ')).toContain('args=')
+  expect(runs.some((r) => r[0] === 'ps' && r.includes('-A') && r.join(' ').includes('args='))).toBe(false)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^300 / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5000/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^900 |^6000/ })).toBeUndefined()
+
+  await ui.press({ key: 'close-bg1' })
+  const kill = runs.find((r) => r[0] === 'kill')!
+  expect(kill.slice(0, 2)).toEqual(['kill', '-TERM'])
+  expect([...kill.slice(2)].sort()).toEqual(['100', '200', '300'])
   expect(await ui.find({ type: 'Text', text: /\(stopped\)/ })).toBeDefined()
 })
 

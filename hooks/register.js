@@ -13,6 +13,7 @@ import {
   classifyToolResult,
   cleanPath,
   describeToolCall,
+  descendantsOf,
   emptySnapshot,
   emptyTokens,
   estimateTokens,
@@ -28,7 +29,9 @@ import {
   parseNetstat,
   parsePlan,
   parseProcessList,
+  parseScanRoot,
   parseTaskNotification,
+  portsOf,
   promptFromMessages,
   pushError,
   splitUsage,
@@ -51,10 +54,21 @@ const TASK_NUDGE =
   'whenever the work takes more than one step: create the tasks before starting, mark exactly one in_progress while you work on it, ' +
   'and mark each completed as soon as it is done. For a single quick step, one task is enough.'
 
-// Lists every process as `pid<TAB>ppid<TAB>command line`
+// Prints `root<TAB><pid>` for the process that started this PowerShell (Claude
+// Code), then `pid<TAB>ppid<TAB>command line` for the processes under it and
+// nothing else: other processes' command lines never leave PowerShell
 const PS_SCRIPT =
   '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ' +
-  'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}" -f $_.ProcessId,$_.ParentProcessId,$_.CommandLine }'
+  '$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine); ' +
+  '$root = [int](($all | Where-Object { $_.ProcessId -eq $PID }).ParentProcessId); ' +
+  '"root`t$root"; ' +
+  '$kids = @{}; ' +
+  'foreach ($p in $all) { $k = [int]$p.ParentProcessId; if (-not $kids.ContainsKey($k)) { $kids[$k] = New-Object System.Collections.ArrayList }; [void]$kids[$k].Add($p) }; ' +
+  '$seen = @{}; $seen[$root] = $true; $seen[$PID] = $true; ' +
+  '$queue = New-Object System.Collections.Queue; $queue.Enqueue($root); ' +
+  'while ($queue.Count -gt 0) { $id = $queue.Dequeue(); if (-not $kids.ContainsKey($id)) { continue }; ' +
+  'foreach ($c in $kids[$id]) { $cid = [int]$c.ProcessId; if ($seen.ContainsKey($cid)) { continue }; $seen[$cid] = $true; $queue.Enqueue($cid); ' +
+  '"{0}`t{1}`t{2}" -f $cid,$id,$c.CommandLine } }'
 
 // Opens the OS folder picker and prints the chosen path (nothing on cancel).
 // -STA for WinForms; the TopMost owner brings the dialog above the terminal.
@@ -99,6 +113,8 @@ let ttlMs = 5 * 60_000
 let ttlSource = 'default'
 let isWindows = false
 let scanning = false
+// This Claude Code process, whose descendants are the only processes scanned (macOS, Linux)
+let claudePid = 0
 let ticks = 0
 let usage = null
 const agentLabels = new Map()
@@ -715,20 +731,34 @@ async function agentLabel($, agentId) {
 // ---------------------------------------------------------------------------
 // Processes
 
-/** Every OS process with its parent and command line, and the TCP ports each one listens on. */
+/**
+ * The processes under this Claude Code process, with parent and command line,
+ * and the TCP ports each one listens on. Nothing outside that tree is kept:
+ * the lists are cut to it here, before anything is stored or drawn.
+ */
 async function listProcesses($) {
   if (isWindows) {
     const [list, net] = await Promise.all([
       $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_SCRIPT], { timeoutMs: 20_000 }),
       $.process.run(['netstat', '-ano'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })),
     ])
-    return { procs: parseProcessList(list.stdout, true), ports: parseNetstat(net.stdout) }
+    const procs = descendantsOf(parseProcessList(list.stdout, true), parseScanRoot(list.stdout))
+    return { procs, ports: portsOf(parseNetstat(net.stdout), procs.map((p) => p.pid)) }
   }
+  // The shell's parent is the process that started it: Claude Code
+  claudePid ||= Number((await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 10_000 })).stdout.trim()) || 0
+  // Pids and parents only, to find the tree; command lines for that tree alone
+  const tree = await $.process.run(['ps', '-A', '-o', 'pid=,ppid='], { timeoutMs: 10_000 })
+  const mine = descendantsOf(parseProcessList(tree.stdout, false), claudePid)
+  if (mine.length === 0) return { procs: [], ports: new Map() }
+  const pidList = mine.map((p) => p.pid).join(',')
   const [list, net] = await Promise.all([
-    $.process.run(['ps', '-axo', 'pid=,ppid=,args='], { timeoutMs: 10_000 }),
-    $.process.run(['lsof', '-nP', '-iTCP', '-sTCP:LISTEN', '-Fpn'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })),
+    $.process.run(['ps', '-o', 'pid=,ppid=,args=', '-p', pidList], { timeoutMs: 10_000 }),
+    $.process.run(['lsof', '-nP', '-a', '-p', pidList, '-iTCP', '-sTCP:LISTEN', '-Fpn'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })),
   ])
-  return { procs: parseProcessList(list.stdout, false), ports: parseLsof(net.stdout) }
+  // A pid that ended and was reused between the two reads is no longer under Claude Code
+  const procs = descendantsOf(parseProcessList(list.stdout, false), claudePid)
+  return { procs, ports: portsOf(parseLsof(net.stdout), procs.map((p) => p.pid)) }
 }
 
 async function scanProcesses($, isManual) {

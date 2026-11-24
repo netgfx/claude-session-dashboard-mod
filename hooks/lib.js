@@ -376,18 +376,60 @@ export function exeName(cmdline) {
   return m.split(/[\\/]/).pop() ?? ''
 }
 
-/** Parses `pid<TAB>ppid<TAB>cmdline` lines (Windows) or `ps -o pid=,ppid=,args=` output. */
+/**
+ * Parses `pid<TAB>ppid<TAB>cmdline` lines (Windows) or `ps -o pid=,ppid=,args=`
+ * output; `ps -o pid=,ppid=` rows (no command line) get an empty `cmd`.
+ */
 export function parseProcessList(text, isWindows) {
   const procs = []
   for (const line of String(text).split(/\r?\n/)) {
     if (!line.trim()) continue
     let m
     if (isWindows) m = line.match(/^(\d+)\t(\d+)\t(.*)$/)
-    else m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/)
+    else m = line.match(/^\s*(\d+)\s+(\d+)(?:\s+(.*))?$/)
     if (!m) continue
-    procs.push({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] })
+    procs.push({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] ?? '' })
   }
   return procs
+}
+
+/** The `root<TAB>pid` line the Windows scan prints first: the Claude Code process. */
+export function parseScanRoot(text) {
+  const m = String(text).match(/^root\t(\d+)\s*$/m)
+  return m ? Number(m[1]) : 0
+}
+
+/**
+ * The processes under `rootPid` (children, their children, and so on), never
+ * the root itself. Everything else on the machine is left out, so the pane
+ * only ever sees this Claude Code session's own process tree.
+ */
+export function descendantsOf(procs, rootPid) {
+  if (!rootPid) return []
+  const children = new Map()
+  for (const p of procs) {
+    const list = children.get(p.ppid) ?? []
+    list.push(p)
+    children.set(p.ppid, list)
+  }
+  const out = []
+  const seen = new Set([rootPid])
+  const queue = [rootPid]
+  while (queue.length) {
+    for (const p of children.get(queue.shift()) ?? []) {
+      if (seen.has(p.pid)) continue
+      seen.add(p.pid)
+      out.push(p)
+      queue.push(p.pid)
+    }
+  }
+  return out
+}
+
+/** Keeps the listening ports of `pids` only. */
+export function portsOf(ports, pids) {
+  const keep = new Set(pids)
+  return new Map([...ports].filter(([pid]) => keep.has(pid)))
 }
 
 /** `netstat -ano` (Windows) -> Map<pid, port[]> for listening TCP sockets. */
