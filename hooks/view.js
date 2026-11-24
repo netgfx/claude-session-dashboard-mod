@@ -359,7 +359,7 @@ function linkSection(E, v, act, W) {
 // ---------------------------------------------------------------------------
 
 // What the main agent is doing now, then the plan from plan mode, the task
-// tools' list, subagents and swarm-mod's agents, each group in its own color
+// tools' list, subagents and the swarm plugin's agents, each group in its own color
 function taskSection(E, v, W, act) {
   const { Box, Text } = E
   const groups = [nowGroup(E, v, W, act),planGroup(E, v, W), taskGroup(E, v, W), agentGroup(E, v, W), swarmGroup(E, v, W)].filter(Boolean)

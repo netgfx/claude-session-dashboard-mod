@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
-  plugin: 'session-dashboard',
+  plugin: 'powermods-session-dashboard',
   component: 'Pane',
   requestId: 'session-dashboard',
   viewport: { columns: 160, rows: 50 },
@@ -289,7 +289,7 @@ test('the prompt gets no task-list instruction unless force_task_list is on', as
 })
 
 const band = (isFullscreen: boolean) => ({
-  plugin: 'session-dashboard',
+  plugin: 'powermods-session-dashboard',
   surface: 'terminal',
   component: 'AbovePrompt',
   requestId: 'above-prompt',

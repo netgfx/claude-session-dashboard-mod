@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { describeToolCall, mergeAgents, parsePlan, swarmRows } from '../hooks/lib.js'
 
 const PANE = {
-  plugin: 'session-dashboard',
+  plugin: 'powermods-session-dashboard',
   component: 'Pane',
   requestId: 'session-dashboard',
   viewport: { columns: 160, rows: 50 },
@@ -37,16 +37,26 @@ test('parsePlan takes the top-level numbered items, else headings, else bullets'
   expect(parsePlan('').steps).toEqual([])
 })
 
-test('mergeAgents keeps finished subagents, leaves out swarm-mod ones, and caps the list', () => {
-  let known = mergeAgents({}, [{ id: 'a1', type: 'Explore', description: 'find routes', status: 'running' }, { id: 's1', type: 'teammate', description: 'x', status: 'running', spawnedBy: 'swarm-mod' }], 1, 'swarm-mod')
+test('mergeAgents keeps finished subagents, leaves out the swarm plugin\'s, and caps the list', () => {
+  const swarm = ['powermods-swarm', 'swarm-mod']
+  let known = mergeAgents(
+    {},
+    [
+      { id: 'a1', type: 'Explore', description: 'find routes', status: 'running' },
+      { id: 's1', type: 'teammate', description: 'x', status: 'running', spawnedBy: 'swarm-mod' },
+      { id: 's2', type: 'teammate', description: 'y', status: 'running', spawnedBy: 'powermods-swarm' },
+    ],
+    1,
+    swarm,
+  )
   expect(Object.keys(known)).toEqual(['a1'])
-  known = mergeAgents(known, [], 2, 'swarm-mod')
+  known = mergeAgents(known, [], 2, swarm)
   expect(known.a1.status).toBe('completed')
   const many = Array.from({ length: 12 }, (_, i) => ({ id: 'x' + i, type: 'Explore', description: 'd', status: 'completed' }))
   expect(Object.keys(mergeAgents({}, many, 3)).length).toBe(8)
 })
 
-test('swarmRows reads swarm-mod snapshot agents in order', () => {
+test('swarmRows reads the swarm snapshot agents in order', () => {
   const rows = swarmRows({
     order: ['b', 'a'],
     agents: {
@@ -97,24 +107,29 @@ test('subagents show as type · description with their status', async ($, on) =>
   expect(await ui.find({ type: 'Text', text: 'all finished' })).toBeDefined()
 })
 
-test('swarm-mod agents show in their own group when swarm-mod is loaded', async ($, on) => {
-  on('state.get', ($: any, e: any, next: any) => {
-    if (e.plugin !== 'swarm-mod') return next(e)
-    return {
-      value: {
-        version: 1,
-        value: {
-          order: ['a'],
-          agents: { a: { name: 'scout', status: 'working', activity: 'Bash: npm test', tokens: { input: 2000, output: 0, cacheRead: 0, cacheWrite: 0 } } },
-        },
-      },
-    }
+const SWARM_SNAPSHOT = {
+  order: ['a'],
+  agents: { a: { name: 'scout', status: 'working', activity: 'Bash: npm test', tokens: { input: 2000, output: 0, cacheRead: 0, cacheWrite: 0 } } },
+}
+
+// The swarm plugin is powermods-swarm now and was swarm-mod before: either one's snapshot shows
+for (const swarmPlugin of ['powermods-swarm', 'swarm-mod']) {
+  test('the swarm plugin\'s agents show in their own group when ' + swarmPlugin + ' is loaded', async ($, on) => {
+    const asked: string[] = []
+    on('state.get', ($: any, e: any, next: any) => {
+      if (e.plugin === 'powermods-session-dashboard') return next(e)
+      asked.push(e.plugin)
+      if (e.plugin !== swarmPlugin) return { value: { version: 0, value: undefined } }
+      return { value: { version: 1, value: SWARM_SNAPSHOT } }
+    })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: '● swarm' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'scout · Bash: npm test' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '2.0k' })).toBeDefined()
+    // The current name first
+    expect(asked[0]).toBe('powermods-swarm')
   })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: '● swarm' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'scout · Bash: npm test' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '2.0k' })).toBeDefined()
-})
+}
 
 test('describeToolCall gives a short line per tool', () => {
   expect(describeToolCall({ tool: 'Bash', command: 'npm test', description: 'Run the tests' })).toBe('Bash · Run the tests')

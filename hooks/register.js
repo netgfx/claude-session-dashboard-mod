@@ -46,6 +46,9 @@ const PANE = 'session-dashboard'
 const NO_DOCK =
   'Dashboard opens as a right-hand sidebar only in the fullscreen layout: start Claude Code with CLAUDE_CODE_NO_FLICKER=1 in a terminal at least 110 columns wide'
 const BACKGROUND_TOOLS = ['Bash', 'PowerShell', 'Monitor']
+// The swarm plugin under its current and former names: it lists its own
+// agents, so the subagents group leaves out the ones it started
+const SWARM_PLUGINS = ['powermods-swarm', 'swarm-mod']
 
 // Added to each prompt with `force_task_list` on, so the model keeps a task list
 // the pane can show. Off by default: newer models have no task tool to keep one
@@ -359,7 +362,7 @@ export function register(on, opts) {
     const E = $.ui.resolve(e)
     const now = Date.now()
     const redraw = () => $.ui.invalidate('ui.render')
-    // Read while drawing, so the pane is drawn again when swarm-mod writes it
+    // Read while drawing, so the pane is drawn again when the swarm plugin writes it
     const swarm = await readSwarm($)
 
     return renderDashboard(
@@ -433,7 +436,7 @@ export function register(on, opts) {
 // State
 
 async function restore($) {
-  const { value } = await $.state.get({ plugin: 'session-dashboard', key: 'snapshot' })
+  const { value } = await $.state.get({ plugin: 'powermods-session-dashboard', key: 'snapshot' })
   if (value && typeof value === 'object') S = { ...emptySnapshot(), ...value }
   // Saved before the whole prompt was kept: find it in the transcript
   if (S.now?.headline && !S.now.prompt) {
@@ -448,7 +451,7 @@ async function restore($) {
 
 /** Saves the snapshot for the next hot reload and redraws the pane. */
 function changed($) {
-  $.state.set({ plugin: 'session-dashboard', key: 'snapshot' }, S).catch(() => {})
+  $.state.set({ plugin: 'powermods-session-dashboard', key: 'snapshot' }, S).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
@@ -630,7 +633,7 @@ function endTurn($) {
 
 async function refreshAgents($) {
   try {
-    const next = mergeAgents(S.agents, await $.agent.list(), Date.now(), 'swarm-mod')
+    const next = mergeAgents(S.agents, await $.agent.list(), Date.now(), SWARM_PLUGINS)
     if (JSON.stringify(next) !== JSON.stringify(S.agents)) {
       S.agents = next
       changed($)
@@ -640,12 +643,23 @@ async function refreshAgents($) {
   }
 }
 
+/**
+ * The swarm plugin's agents, read from its `snapshot` state: under its current
+ * name, powermods-swarm, else under its former name, swarm-mod, so either
+ * version works. Read only; empty when neither is loaded.
+ */
 async function readSwarm($) {
+  try {
+    const { value } = await $.state.get({ plugin: 'powermods-swarm', key: 'snapshot' })
+    if (value !== undefined) return swarmRows(value)
+  } catch {
+    // powermods-swarm isn't loaded
+  }
   try {
     const { value } = await $.state.get({ plugin: 'swarm-mod', key: 'snapshot' })
     return swarmRows(value)
   } catch {
-    // swarm-mod isn't loaded
+    // swarm-mod isn't loaded either
     return []
   }
 }

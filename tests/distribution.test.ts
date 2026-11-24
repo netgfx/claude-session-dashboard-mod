@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { fmtPct, labelSpot, pieGrid, splitUsage } from '../hooks/lib.js'
 
 const PANE = {
-  plugin: 'session-dashboard',
+  plugin: 'powermods-session-dashboard',
   component: 'Pane',
   requestId: 'session-dashboard',
   viewport: { columns: 160, rows: 50 },

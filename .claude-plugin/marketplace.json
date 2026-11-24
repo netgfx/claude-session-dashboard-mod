@@ -1,21 +1,24 @@
 {
   "name": "claude-session-dashboard-mod",
-  "owner": { "name": "netgfx" },
+  "owner": { "name": "Michael Dobekidis", "email": "djmid71@gmail.com", "url": "https://github.com/netgfx" },
   "metadata": {
-    "description": "Marketplace for the session-dashboard Claude Code mod",
-    "version": "0.2.2"
+    "description": "Marketplace for the Session Dashboard Claude Code mod (powermods-session-dashboard)",
+    "version": "0.3.0"
   },
   "plugins": [
     {
-      "name": "session-dashboard",
+      "name": "powermods-session-dashboard",
       "source": "./",
-      "description": "A side pane for the current session: prompt cache hot/cold, tool calls and errors, background commands with restart and stop, the live task list, and token usage for the main agent and subagents",
-      "version": "0.2.2",
-      "author": { "name": "djmid" },
+      "description": "A side pane for the current session: prompt cache hot/cold, tool calls and errors, background commands with restart and stop, the approved plan, task list, subagents and swarm agents, and token usage for the main agent and subagents",
+      "version": "0.3.0",
+      "author": { "name": "Michael Dobekidis", "email": "djmid71@gmail.com", "url": "https://github.com/netgfx" },
       "homepage": "https://github.com/netgfx/claude-session-dashboard-mod",
       "repository": "https://github.com/netgfx/claude-session-dashboard-mod",
-  "license": "MIT",
+      "license": "MIT",
       "keywords": ["mod", "dashboard", "pane", "cache", "tokens", "tasks"]
     }
-  ]
+  ],
+  "renames": {
+    "session-dashboard": "powermods-session-dashboard"
+  }
 }

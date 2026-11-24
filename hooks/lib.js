@@ -239,14 +239,15 @@ export function parsePlan(markdown) {
 
 /**
  * Merges `$.agent.list()` into the subagents seen so far. Ones started by
- * `skipPlugin` (swarm-mod, which lists its own) are left out; ones the list
- * no longer has finished.
+ * `skipPlugins` (the swarm plugin, which lists its own, under any of its
+ * names) are left out; ones the list no longer has finished.
  */
-export function mergeAgents(known, listed, now, skipPlugin) {
+export function mergeAgents(known, listed, now, skipPlugins = []) {
+  const skip = new Set([skipPlugins].flat().filter(Boolean))
   const out = { ...known }
   const live = new Set()
   for (const a of listed ?? []) {
-    if (!a?.id || (skipPlugin && a.spawnedBy === skipPlugin)) continue
+    if (!a?.id || skip.has(a.spawnedBy)) continue
     live.add(a.id)
     const prev = out[a.id]
     out[a.id] = { id: a.id, type: a.type, description: a.description || a.name || '', status: a.status, at: prev?.at ?? now }
@@ -305,7 +306,7 @@ export function describeToolCall(e) {
   return text ? tool + ' · ' + text : tool
 }
 
-/** swarm-mod's snapshot as rows: `{ name, status, activity, tokens, pending }`. */
+/** The swarm plugin's snapshot (powermods-swarm, formerly swarm-mod) as rows: `{ name, status, activity, tokens, pending }`. */
 export function swarmRows(snapshot) {
   if (!snapshot || !Array.isArray(snapshot.order) || !snapshot.agents) return []
   return snapshot.order
