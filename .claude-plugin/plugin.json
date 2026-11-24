@@ -7,6 +7,7 @@
   "homepage": "https://github.com/netgfx/claude-session-dashboard-mod",
   "repository": "https://github.com/netgfx/claude-session-dashboard-mod",
   "license": "MIT",
+  "privacyPolicyUrl": "https://github.com/netgfx/claude-session-dashboard-mod/blob/main/PRIVACY.md",
   "keywords": ["mod", "dashboard", "pane", "cache", "tokens", "tasks"],
   "network": { "hosts": [] },
   "types": "./types/index.d.ts",
