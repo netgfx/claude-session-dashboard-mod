@@ -93,11 +93,11 @@ Then type in the Claude Code prompt:
 
 | Command | What it does |
 | :- | :- |
-| `/dashboard` or `/session-dashboard` | Toggles the pane |
-| `/dashboard open` / `/dashboard close` | Opens or closes it |
-| `/dashboard reset` | Zeroes the counters |
+| `/session-dashboard` | Toggles the pane |
+| `/session-dashboard open` / `/session-dashboard close` | Opens or closes it |
+| `/session-dashboard reset` | Zeroes the counters |
 
-The pane only ever opens as a sidebar on the right. Claude Code docks panes there only in the **fullscreen** layout, at 110 columns or wider. On the main screen it would put the pane above the prompt, so the dashboard stays closed there and `/dashboard` shows a toast explaining why. To get the fullscreen layout, start Claude Code with `CLAUDE_CODE_NO_FLICKER=1` (outside tmux). On start, the pane opens by itself once the terminal is at least 144 columns wide.
+The pane only ever opens as a sidebar on the right. Claude Code docks panes there only in the **fullscreen** layout, at 110 columns or wider. On the main screen it would put the pane above the prompt, so the dashboard stays closed there and `/session-dashboard` shows a toast explaining why. To get the fullscreen layout, start Claude Code with `CLAUDE_CODE_NO_FLICKER=1` (outside tmux). On start, the pane opens by itself once the terminal is at least 144 columns wide.
 
 Keys while the pane has focus (click it, or Ctrl+X then Tab): `q` hides it, `e` shows or hides the error list, `s` rescans processes, `x` clears ended commands, `l` links a folder, `p` shows the narrow slices' shares in the distribution, Tab moves between the ↻ / ✕ buttons, Esc returns to the prompt.
 

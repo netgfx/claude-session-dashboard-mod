@@ -268,16 +268,16 @@ test('auto-open never opens the pane above the prompt on the main screen', async
   expect(opened.length).toBe(0)
 })
 
-test('/dashboard on the main screen explains instead of opening above the prompt', async ($, on) => {
+test('/session-dashboard on the main screen explains instead of opening above the prompt', async ($, on) => {
   const opened: any[] = []
   const toasts: string[] = []
   stubStart(on, opened, toasts)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
-  await $.command.run({ command: 'dashboard', args: '', presentation: { isFullscreen: false, columns: 200 } } as any)
+  await $.command.run({ command: 'session-dashboard', args: '', presentation: { isFullscreen: false, columns: 200 } } as any)
   expect(opened.length).toBe(0)
   expect(toasts.some((t) => /fullscreen/.test(t))).toBe(true)
 
-  await $.command.run({ command: 'dashboard', args: '', presentation: { isFullscreen: true, columns: 200 } } as any)
+  await $.command.run({ command: 'session-dashboard', args: '', presentation: { isFullscreen: true, columns: 200 } } as any)
   expect(opened.some((o) => o.id === 'session-dashboard')).toBe(true)
 })
 
@@ -291,7 +291,7 @@ test('usage limits show a bar per window, and none when a window is unused', asy
     ],
   })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' } as any)
-  await $.command.run({ command: 'dashboard', args: '', presentation: { isFullscreen: true, columns: 200 } } as any)
+  await $.command.run({ command: 'session-dashboard', args: '', presentation: { isFullscreen: true, columns: 200 } } as any)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'USAGE LIMITS' })).toBeDefined()

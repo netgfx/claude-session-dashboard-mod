@@ -142,16 +142,6 @@ export function register(on, opts) {
       argumentHint: '[open|close|reset]',
       immediate: true,
     })
-    try {
-      await $.command.register({
-        name: 'dashboard',
-        description: 'Toggle the session dashboard pane (open | close | reset)',
-        argumentHint: '[open|close|reset]',
-        immediate: true,
-      })
-    } catch {
-      // Another plugin or a built-in owns /dashboard; /session-dashboard still works
-    }
     return started
   })
 
@@ -166,7 +156,7 @@ export function register(on, opts) {
 
   // ---- Commands -----------------------------------------------------------
 
-  on('command.run', { command: ['dashboard', 'session-dashboard'] }, async ($, e) => {
+  on('command.run', { command: 'session-dashboard' }, async ($, e) => {
     const arg = String(e.args ?? '').trim().toLowerCase()
     if (arg === 'reset') {
       S = emptySnapshot()
