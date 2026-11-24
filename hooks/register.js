@@ -134,6 +134,11 @@ let linkRoot
 // (no folder picker here); busy: what the section is doing right now
 let linkUi = { editing: null, adding: false, busy: null }
 
+// The dashboard only watches: a hook of its that fails must never change what
+// Claude Code does, so each one fails open and the event goes on unchanged.
+// After next() resolved, next(e) returns that result without running it again.
+const failOpen = ($, e, next) => next(e)
+
 export function register(on, opts) {
   options = opts ?? {}
 
@@ -168,7 +173,7 @@ export function register(on, opts) {
     steps.clear()
     changed($)
     return next(e)
-  })
+  }).catch(failOpen)
 
   // ---- Commands -----------------------------------------------------------
 
@@ -196,12 +201,12 @@ export function register(on, opts) {
     await refreshUsage($)
     $.ui.invalidate('ui.render')
     return {}
-  })
+  }).catch(failOpen)
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) paneOpen = false
     return next(e)
-  })
+  }).catch(failOpen)
 
   // ---- Tool calls, errors, tasks, background commands ---------------------
 
@@ -222,7 +227,7 @@ export function register(on, opts) {
     }
     afterToolCall($, e, result)
     return result
-  })
+  }).catch(failOpen)
 
   // Background tasks report back when they end
   on('session.receive', async ($, e, next) => {
@@ -244,7 +249,7 @@ export function register(on, opts) {
       }
     }
     return next(e)
-  })
+  }).catch(failOpen)
 
   // At the end of each response, the engine lists the background work still in flight
   on('classic.Stop', async ($, e, next) => {
@@ -256,7 +261,7 @@ export function register(on, opts) {
     if (S.now && S.now.status !== 'done') setNow($, 'done', { step: 'answered' })
     endTurn($)
     return next(e)
-  })
+  }).catch(failOpen)
 
   // ---- What the main agent is doing now -----------------------------------
 
@@ -288,25 +293,25 @@ export function register(on, opts) {
     const what = describeToolCall({ tool: e.tool_name, ...(e.tool_input ?? {}) })
     setNow($, 'waiting', { step: (e.agent_id ? 'subagent needs approval: ' : 'needs approval: ') + what, waitAgent: e.agent_id })
     return next(e)
-  })
+  }).catch(failOpen)
 
   on('classic.SubagentStart', async ($, e, next) => {
     await refreshAgents($)
     return next(e)
-  })
+  }).catch(failOpen)
 
   on('classic.SubagentStop', async ($, e, next) => {
     const a = S.agents[e.agent_id]
     if (a) S.agents = { ...S.agents, [a.id]: { ...a, status: 'completed' } }
     await refreshAgents($)
     return next(e)
-  })
+  }).catch(failOpen)
 
   on('classic.StopFailure', async ($, e, next) => {
     pushError(S, { at: Date.now(), tool: 'API', kind: 'API error', message: firstLine(e.error_details ?? e.error) })
     changed($)
     return next(e)
-  })
+  }).catch(failOpen)
 
   // ---- Tokens and the prompt cache ----------------------------------------
 
@@ -326,7 +331,7 @@ export function register(on, opts) {
   on('prompt.submit', async ($, e, next) => {
     if (options.force_task_list !== true) return next(e)
     return next({ ...e, context: [...(e.context ?? []), TASK_NUDGE] })
-  })
+  }).catch(failOpen)
 
   // ---- Drawing ------------------------------------------------------------
 
