@@ -121,6 +121,36 @@ Installing through the marketplace loads it in every session. For a local checko
 
 The dashboard watches the session and draws what it sees. It never approves, denies or rewrites a tool call, sends nothing over the network, and calls no model.
 
+### At a glance
+
+- **Programs it runs:** only to find, stop and restart the background commands it tracks, and to link folders from the Linked folders section. Each is one named program with fixed arguments; only process ids and folder paths vary, and they go in as arguments or environment variables, never as script text. The PowerShell and `sh` calls run fixed scripts written in `hooks/register.js`. It runs no downloader, and never runs text from the network, a model or the conversation as a command.
+  - `powershell -NoProfile -NonInteractive -Command <process scan>` and `netstat -ano` (Windows); `sh -c 'echo $PPID'`, `ps -A -o pid=,ppid=`, `ps -o pid=,ppid=,args= -p <pids>` and `lsof -nP -a -p <pids> -iTCP -sTCP:LISTEN -Fpn` (macOS, Linux): the pid and listening ports of each background command, among the processes under this Claude Code process only.
+  - `taskkill /PID <pid> /T /F` (Windows) or `kill -TERM <pids>` (macOS, Linux): **✕** and **↻**, after a fresh scan.
+  - The folder picker for **+**: `powershell -NoProfile -NonInteractive -STA -Command <folder dialog>` (Windows), `osascript` with `choose folder` (macOS), `zenity --file-selection --directory` or `kdialog --getexistingdirectory` (Linux).
+  - Folder links: `powershell -NoProfile -NonInteractive -Command <New-Item SymbolicLink or Junction>` or `ln -sn <folder> <link>` to make one; `powershell … <delete the link only>` or `rm <link>` to remove one.
+- **What it sends and where:** nothing leaves the machine. It contacts no host and calls no model. What it reads from the conversation (your request's text, tool-call inputs and results, token usage, and the transcript after a hot reload) stays in the pane and in its in-memory `$.state`. The programs above get only process ids and folder paths. The one way conversation data reaches a program is **↻**, which runs the background command Claude had started (its own command text) again through Claude Code's tool, on your press.
+- **Hosts it contacts:** none (`network.hosts` is empty).
+- **Tools it calls itself:** `TaskStop`, when you press **✕** or **↻** on a background command; and `Bash`, `PowerShell` or `Monitor`, when you press **↻**, to run that same command again in the background. Claude Code's permission rules apply to that call. It calls no tool unless you press one of those buttons.
+- **Permission decisions:** none. Its `classic.PermissionRequest` hook runs when Claude Code shows a permission dialog, only notes "needs approval" in the pane, and passes the request on unchanged (`return next(e)`): it never allows, denies or asks, and the decision stays with you.
+- **Files it writes:** `<workspace root>/.gitignore`, and folder links (symbolic links, or junctions on Windows) at the workspace root, only from the Linked folders section. `.gitignore` is git's settings file for ignored paths: the dashboard edits it on purpose, adding or removing one `/<link name>` line under a `# Linked folders (session-dashboard)` header, so the linked folders aren't committed. It writes no build, start-up or instructions file.
+- **What it puts in prompts:** it submits no prompts. With `force_task_list` on (off by default) it adds the task-list text quoted below to each prompt you send.
+- **What it gives the agents it starts:** it starts no agents.
+- **Slash commands it runs:** none. It adds `/session-dashboard`.
+- **Environment variables / config it sets:** none. It reads no settings.
+- **Hooks:**
+  - `session.start`: registers `/session-dashboard`, restores its counts, starts its 1-second timer. Changes nothing.
+  - `classic.SessionStart` (after `/clear`, `/resume`, `/branch`): starts the counts over. Changes nothing.
+  - `command.run` for `/session-dashboard` only: opens, closes or resets the pane. It sees no other command.
+  - `ui.close`: notes that the pane closed.
+  - `tool.call` (every tool): counts the call and reads its input and result. Passes it on unchanged.
+  - `session.receive`: reads background-task notifications. Passes every message on unchanged.
+  - `classic.Stop`, `classic.StopFailure`, `classic.SubagentStart`, `classic.SubagentStop`: end of a turn, API errors, subagents starting and stopping. Change nothing.
+  - `classic.PermissionRequest`: notes a waiting permission dialog, as above. Changes nothing.
+  - `turn.start`, `turn.step`, `turn.complete`: the request being worked on, token usage per request, the end of a turn. Change nothing.
+  - `prompt.submit`: unchanged, unless `force_task_list` is on; then it adds the task-list text to the prompt's context.
+  - `ui.render` for its own pane, and for the band above the prompt only to learn whether the layout can dock the pane. It draws nothing in the band.
+
+The sections below give the details.
 ### What it watches
 
 - **Tool calls** (`tool.call`): counts every call, reads its input and result to find errors, background task ids and task-list updates, then passes the call on unchanged.
