@@ -140,7 +140,11 @@ let linkUi = { editing: null, adding: false, busy: null }
 // The dashboard only watches: a hook of its that fails must never change what
 // Claude Code does, so each one fails open and the event goes on unchanged.
 // After next() resolved, next(e) returns that result without running it again.
-const failOpen = ($, e, next) => next(e)
+// Not used on the permission hook or the command hook, which handle their own
+// failures inline (see them).
+function failOpen($, e, next) {
+  return next(e)
+}
 
 export function register(on, opts) {
   options = opts ?? {}
@@ -204,7 +208,7 @@ export function register(on, opts) {
     await refreshUsage($)
     $.ui.invalidate('ui.render')
     return {}
-  }).catch(failOpen)
+  }).catch(() => ({})) // its own command: on a failure it prints nothing, as on success
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) paneOpen = false
@@ -291,12 +295,19 @@ export function register(on, opts) {
     return next(e)
   })
 
-  // A permission dialog: the agent waits on you until it is answered
+  // A permission dialog: the agent waits on you until it is answered. This hook
+  // only notes that, and always passes the request on unchanged with
+  // `return next(e)`: the decision stays with you. Written plainly, with no
+  // .catch, so the directory can read that it never answers: a failure while
+  // noting it is caught inside and the request still goes on.
   on('classic.PermissionRequest', async ($, e, next) => {
-    const what = describeToolCall({ tool: e.tool_name, ...(e.tool_input ?? {}) })
-    setNow($, 'waiting', { step: (e.agent_id ? 'subagent needs approval: ' : 'needs approval: ') + what, waitAgent: e.agent_id })
+    try {
+      notePermissionRequest($, e.tool_name, e.tool_input, e.agent_id)
+    } catch {
+      // the pane just misses the "needs approval" line
+    }
     return next(e)
-  }).catch(failOpen)
+  })
 
   on('classic.SubagentStart', async ($, e, next) => {
     await refreshAgents($)
@@ -614,6 +625,12 @@ async function approvePlan($, out) {
 
 const TURN_ENDS = { answer: 'answered', aborted: 'interrupted', error: 'stopped on an API error', refusal: 'refused' }
 
+/** A permission dialog opened: show the agent waiting on you, and on what. */
+function notePermissionRequest($, toolName, toolInput, agentId) {
+  const what = describeToolCall({ tool: toolName, ...(toolInput ?? {}) })
+  setNow($, 'waiting', { step: (agentId ? 'subagent needs approval: ' : 'needs approval: ') + what, waitAgent: agentId })
+}
+
 /** Moves the main agent's status line; `fields` overrides headline, step or since. */
 function setNow($, status, fields = {}) {
   const now = Date.now()
@@ -633,9 +650,9 @@ function endTurn($) {
 
 async function refreshAgents($) {
   try {
-    const next = mergeAgents(S.agents, await $.agent.list(), Date.now(), SWARM_PLUGINS)
-    if (JSON.stringify(next) !== JSON.stringify(S.agents)) {
-      S.agents = next
+    const merged = mergeAgents(S.agents, await $.agent.list(), Date.now(), SWARM_PLUGINS)
+    if (JSON.stringify(merged) !== JSON.stringify(S.agents)) {
+      S.agents = merged
       changed($)
     }
   } catch {
